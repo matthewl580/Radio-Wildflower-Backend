@@ -16,7 +16,7 @@
     "@fastify/view": "^9.0.0",
         "@fastify/cors": "^9.0.1",
     "@google-cloud/storage": "^7.9.0",
-    "axios": "^1.7.4",
+    "axios": "^1.8.2",
     "child_processes": "^0.1.0",
     "dotenv": "^16.4.5",
     "fastify": "^4.26.2",
