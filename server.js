@@ -547,34 +547,26 @@ async function uploadTrackRefToDatabase(
 }
 async function uploadMP3ToFirebase(
   filePath,
-  destination,
-  callback = () => {}
+  destination
 ) {
   try {
-    // Create a reference to the file in Firebase Storage
+    console.log(`📤 | uploadMP3ToFirebase: ${filePath} -> ${destination}`);
     const storageRef = getStorage().bucket();
-
-    // Create a file object from the local path
-    const file = fs.readFileSync(filePath);
-
-    // Upload the file to Firebase Storage
-    const uploadTask = storageRef
-      .upload(filePath, {
-        destination: destination, 
-        uploadType: "media",
-        metadata: {
-          contentType: "audio/mpeg",
-        },
-      })
-      .then((data) => {
-        console.log(`✅ | Uploaded ${filePath} to storage at ${destination}`);
-        try { callback(data); } catch (cbErr) { console.error('🔥 | upload callback error:', cbErr); }
-      });
+    const [response] = await storageRef.upload(filePath, {
+      destination: destination, 
+      uploadType: "media",
+      metadata: {
+        contentType: "audio/mpeg",
+      },
+    });
+    console.log(`✅ | Firebase upload successful: ${destination}`);
+    return response;
   } catch (error) {
-    console.error("Error uploading MP3:", error);
+    console.error(`🔥 | ERROR uploadMP3ToFirebase:`, error);
+    throw error;
   }
 }
-const chunkSize = 0.25 * 1024 * 1024; // 1/4 MB chunks
+const chunkSize = 1 * 1024 * 1024; // 1 MB chunks (matching Firebase storage structure)
 const outputDir = "chunks"; // The output directory
   var chunkMediaDurationArray = [];
 if (!request.body.downloadURL) {
@@ -586,143 +578,128 @@ console.log(`📥 | /addTrack START: Downloading MP3 from ${request.body.downloa
 console.log(`📥 | Track: title="${request.body.title}", author="${request.body.author}", duration=${request.body.duration}s, trackID=${trackID}`);
 
 https
-  .get(request.body.downloadURL, (response) => {
+  .get(request.body.downloadURL, async (response) => {
     if (response.statusCode !== 200) {
       console.error(`Error fetching MP3 from URL: ${response.statusCode}`);
-      process.exit(1);
+      return reply.code(500).send({ error: `Failed to download MP3: HTTP ${response.statusCode}` });
     }
     console.log(`✅ | HTTP 200 OK - Beginning to stream & chunk the MP3 data`);
 
     let currentChunk = 1;
     let chunkData = Buffer.alloc(0);
     let totalBytesReceived = 0;
+    const chunks = []; // Store all chunks in memory or disk for processing
 
     response.on("data", (chunk) => {
       chunkData = Buffer.concat([chunkData, chunk]);
       totalBytesReceived += chunk.length;
-      console.log(`📦 | Stream data: +${chunk.length}B (total: ${totalBytesReceived}B)`);
+      console.log(`📦 | Stream data: +${chunk.length}B (total: ${totalBytesReceived}B, buffer: ${chunkData.length}B)`);
       
+      // Process full chunks
       while (chunkData.length >= chunkSize) {
         const chunkBuffer = chunkData.slice(0, chunkSize);
         chunkData = chunkData.slice(chunkSize);
-
-        fs.mkdirSync(outputDir, { recursive: true }); // Create output directory if needed
-        const chunkNum = currentChunk;
-        const chunkFilename = `chunks/chunk-${chunkNum}.mp3`;
-        console.log(`💾 | Writing chunk #${chunkNum} to disk (${chunkBuffer.length}B)...`);
-        fs.writeFileSync(chunkFilename, chunkBuffer);
-        const stat = fs.statSync(chunkFilename);
-        console.log(`✅ | Chunk #${chunkNum} written: ${chunkFilename} (actual: ${stat.size}B)`);
-        currentChunk++;
-        
-        console.log(`📤 | Starting Firebase upload for chunk #${chunkNum}...`);
-        uploadMP3ToFirebase(
-          chunkFilename,
-          `Tracks/${trackID}/Chunk_${chunkNum}.mp3`,
-          (data) => {
-            console.log(`⏱️ | Computing mp3-duration for chunk #${chunkNum}...`);
-            // access the duration of the temporary file
-            const duration = mp3Duration(chunkFilename).then((durationVal) => {
-              console.log(`⏱️ | Chunk #${chunkNum} duration: ${durationVal}s`);
-                trackChunkDurationArray[trackChunkDurationArray.length] = durationVal;
-                chunkMediaDurationArray.push(durationVal);
-                console.log(`📊 | Updated duration array: ${trackChunkDurationArray.length} segments, latest=${durationVal}s`);
-                //uploading track data to IB database
-               // uploadTrackRefToDatabase(trackID, request, trackChunkDurationArray, numChunks);
-              
-               ensureArtistExists(request.body.author).then(authorId => {
-                 console.log(`🎨 | Artist found/created: "${request.body.author}" -> ${authorId}`);
-                 console.log(`📁 | Writing interim DB entry for ${trackID} (segment ${chunkNum})...`);
-                 setDatabaseFile("Tracks", trackID, {
-                   'Storage Reference URL': `Tracks/${trackID}`,
-                   'Title': request.body.title,
-                   'Author Handle': request.body.author,
-                   'Author ID': authorId,
-                   'Total Track Duration': request.body.duration,
-                   'Segment Durations': trackChunkDurationArray,
-                   'Number of Segments': chunkNum,
-                   'Time Added': new Date(),
-                 }).then(() => console.log(`✅ | DB interim write OK: trackID=${trackID}, segments_now=${chunkNum}, duration_count=${trackChunkDurationArray.length}`)).catch(err => console.error('🔥 | ERROR DB write:', err));
-               }).catch(err => console.error('🔥 | ERROR artist lookup:', err));
-       
-              console.log(`🗑️ | Deleting temp file: ${chunkFilename}`);
-              fs.unlinkSync(chunkFilename);
-              console.log(`✅ | Temp file deleted`);
-            });
-          }
-        );
-        console.log(`📝 | Chunk #${chunkNum} upload & processing initiated`);
+        chunks.push(chunkBuffer);
+        console.log(`📑 | Chunk #${chunks.length} buffered (${chunkBuffer.length}B)`);
       }
     });
 
-    response.on("end", () => {
-      console.log(`🟢 | Download stream ended. Total: ${totalBytesReceived}B, Buffered remainder: ${chunkData.length}B`);
-      // Write remaining data if any
+    response.on("end", async () => {
+      // Handle final remainder
       if (chunkData.length > 0) {
-        const chunkNum = currentChunk;
-        const chunkFilename = `chunks/chunk-${chunkNum}.mp3`;
-        console.log(`💾 | Writing final chunk #${chunkNum} (${chunkData.length}B remainder)...`);
-        fs.writeFileSync(chunkFilename, chunkData);
-        const stat = fs.statSync(chunkFilename);
-        console.log(`✅ | Final chunk #${chunkNum} written: ${chunkFilename} (${stat.size}B)`);
-        
-        console.log(`⏱️ | Computing mp3-duration for final chunk #${chunkNum}...`);
-        const duration = mp3Duration(chunkFilename).then((durationVal) => {
-            console.log(`⏱️ | Final chunk #${chunkNum} duration: ${durationVal}s`);
-            trackChunkDurationArray.push(durationVal);
-            chunkMediaDurationArray.push(durationVal);
-            console.log(`📊 | Final duration array: ${trackChunkDurationArray.length} total, latest=${durationVal}s`);
-            
-            console.log(`🎨 | Looking up/creating artist: "${request.body.author}"...`);
-               ensureArtistExists(request.body.author).then(authorId => {
-                 console.log(`🎨 | Artist found/created: "${request.body.author}" -> ${authorId}`);
-                 console.log(`📁 | Writing FINAL DB entry for ${trackID} (${chunkNum} total segments)...`);
-                 setDatabaseFile("Tracks", trackID, {
-                   'Storage Reference URL': `Tracks/${trackID}`,
-                   'Title': request.body.title,
-                   'Author Handle': request.body.author,
-                   'Author ID': authorId,
-                   'Total Track Duration': request.body.duration,
-                   'Segment Durations': trackChunkDurationArray,
-                   'Number of Segments': chunkNum,
-                   'Time Added': new Date(),
-                 }).then(() => console.log(`✅ | FINAL DB write OK: trackID=${trackID}, total_segments=${chunkNum}, durations=${trackChunkDurationArray.length}`)).catch(err => console.error('🔥 | ERROR final DB:', err));
-               }).catch(err => console.error('🔥 | ERROR final artist:', err));
-        });
-        
-        console.log(`📤 | Uploading FINAL chunk #${chunkNum} to Firebase Storage...`);
-        uploadMP3ToFirebase(
-          chunkFilename,
-          `Tracks/${trackID}/Chunk_${chunkNum}.mp3`,
-          (data) => {
-            console.log(`✅ | Final chunk uploaded to Firebase`);
-            console.log(`🗑️ | Deleting final temp file: ${chunkFilename}`);
-            fs.unlinkSync(chunkFilename);
-            console.log(`✅ | Final temp file deleted`);
-            
-            // Delete the inital mp3 file
-            console.log(`🗑️ | Deleting source file from storage: Tracks/FreshlyUploadedMP3File`);
-            deleteStorageFile(
-              "Tracks/FreshlyUploadedMP3File",
-              () => console.log(`✅ | Source file deleted from storage`)
-              );
-            
-              console.log(`📝 | Calling uploadTrackRefToDatabase (final) for trackID=${trackID}...`);
-              uploadTrackRefToDatabase(trackID, request, chunkMediaDurationArray, chunkNum);
-          }
-        );
-        console.log(`📝 | Final chunk upload & completion initiated`);
+        chunks.push(chunkData);
+        console.log(`📑 | Final chunk buffered (${chunkData.length}B, total chunks: ${chunks.length})`);
       }
 
-      console.log(`✅ | /addTrack workflow COMPLETE! trackID=${trackID}, total_chunks=${currentChunk - 1}`);
+      console.log(`🟢 | Download complete! Total: ${totalBytesReceived}B, Final chunks ready: ${chunks.length}`);
+
+      // Now process all chunks sequentially
+      try {
+        console.log(`🔄 | Processing ${chunks.length} chunks...`);
+        
+        for (let i = 0; i < chunks.length; i++) {
+          const chunkNum = i + 1;
+          const chunkBuffer = chunks[i];
+          const chunkFilename = `chunks/chunk-${chunkNum}.mp3`;
+
+          console.log(`💾 | Processing chunk #${chunkNum}: Writing to disk (${chunkBuffer.length}B)...`);
+          fs.mkdirSync(outputDir, { recursive: true });
+          fs.writeFileSync(chunkFilename, chunkBuffer);
+          const stat = fs.statSync(chunkFilename);
+          console.log(`✅ | Chunk #${chunkNum} written: ${chunkFilename} (${stat.size}B)`);
+
+          // Upload to Firebase
+          console.log(`📤 | Uploading chunk #${chunkNum} to Firebase...`);
+          try {
+            await uploadMP3ToFirebase(
+              chunkFilename,
+              `Tracks/${trackID}/Chunk_${chunkNum}.mp3`
+            );
+            console.log(`✅ | Chunk #${chunkNum} uploaded successfully`);
+
+            // Calculate duration
+            console.log(`⏱️ | Calculating duration for chunk #${chunkNum}...`);
+            const durationVal = await mp3Duration(chunkFilename);
+            console.log(`⏱️ | Chunk #${chunkNum} duration: ${durationVal}s`);
+            trackChunkDurationArray.push(durationVal);
+            chunkMediaDurationArray.push(durationVal);
+            console.log(`📊 | Durations updated: ${trackChunkDurationArray.length} total`);
+
+            // Delete temp file
+            console.log(`🗑️ | Deleting temp file: ${chunkFilename}`);
+            fs.unlinkSync(chunkFilename);
+            console.log(`✅ | Temp file deleted`);
+          } catch (err) {
+            console.error(`🔥 | ERROR processing chunk #${chunkNum}:`, err);
+            throw err;
+          }
+        }
+
+        // All chunks processed, write final DB entry
+        console.log(`🎨 | Looking up/creating artist: "${request.body.author}"...`);
+        const authorId = await ensureArtistExists(request.body.author);
+        console.log(`🎨 | Artist resolved: "${request.body.author}" -> ${authorId}`);
+        
+        console.log(`📁 | Writing FINAL DB entry for ${trackID} (${chunks.length} segments)...`);
+        await setDatabaseFile("Tracks", trackID, {
+          'Storage Reference URL': `Tracks/${trackID}`,
+          'Title': request.body.title,
+          'Author Handle': request.body.author,
+          'Author ID': authorId,
+          'Total Track Duration': request.body.duration,
+          'Segment Durations': trackChunkDurationArray,
+          'Number of Segments': chunks.length,
+          'Time Added': new Date(),
+        });
+        console.log(`✅ | FINAL DB entry written: trackID=${trackID}, segments=${chunks.length}, durations=${trackChunkDurationArray.length}`);
+
+        // Attempt to clean up source file from storage
+        console.log(`🗑️ | Deleting source from storage: Tracks/FreshlyUploadedMP3File`);
+        try {
+          await deleteStorageFile("Tracks/FreshlyUploadedMP3File", () => {
+            console.log(`✅ | Source file deleted from storage`);
+          });
+        } catch (err) {
+          console.warn(`⚠️ | Could not delete source file (may not exist):`, err.message);
+        }
+
+        console.log(`\n✅✅✅ | /addTrack COMPLETE!\n   trackID: ${trackID}\n   total_chunks: ${chunks.length}\n   total_duration: ${request.body.duration}s\n   author: ${request.body.author}\n   title: ${request.body.title}\n✅✅✅\n`);
+        
+        // Send success response
+        return reply.send({ success: true, trackID: trackID, title: request.body.title, chunks: chunks.length });
+        
+      } catch (err) {
+        console.error(`🔥 | FATAL ERROR in chunk processing:`, err);
+        return reply.code(500).send({ error: `Failed to process chunks: ${err.message}` });
+      }
     });
   })
   .on("error", (error) => {
-    console.error(`‼️ | Error splitting MP3: ${error.message}`);
-    process.exit(1);
+    console.error(`🔥 | Network error while downloading MP3: ${error.message}`);
+    return reply.code(500).send({ error: `Network error: ${error.message}` });
   });
 
-return reply.send({ success: true, trackID: trackID, title: request.body.title }); // Return the generated track ID
+// Note: response is sent asynchronously after all processing completes
 });
 // Run the server and report out to the logs
 fastify.listen(
