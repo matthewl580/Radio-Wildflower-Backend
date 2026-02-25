@@ -551,7 +551,7 @@ async function uploadMP3ToFirebase(
 ) {
   try {
     console.log(`📤 | uploadMP3ToFirebase: ${filePath} -> ${destination}`);
-    const storageRef = getStorage().bucket();
+    const storageRef = storage.bucket();
     const [response] = await storageRef.upload(filePath, {
       destination: destination, 
       uploadType: "media",
