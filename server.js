@@ -4,6 +4,7 @@ const https = require("https");
 const mp3Duration = require("mp3-duration");
 const firebase = require("firebase/app");
 const path = require("path");
+const crypto = require("crypto");
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -101,31 +102,93 @@ function getDatabaseFile(collection, fileName, func = () => { }) {
 }
 
 function setDatabaseFile(collection, fileName, data) {
-    console.log(`🗒️ | Setting /{collection}/{fileName} to: \n ${data}`)
-    db.collection(collection).doc(fileName).set(data);
+  console.log(`🗒️ | Setting /{collection}/{fileName} to: \n ${data}`)
+  // Return the Promise so callers can await this operation
+  return db.collection(collection).doc(fileName).set(data);
+}
+
+// Artists mapping helpers (stored in Cloud Storage as `artists.json`)
+async function getArtistsMap() {
+  const bucket = storage.bucket();
+  const file = bucket.file('artists.json');
+  try {
+    const [exists] = await file.exists();
+    if (!exists) return {};
+    const [contents] = await file.download();
+    return JSON.parse(contents.toString('utf8'));
+  } catch (err) {
+    console.error('🔥 | ERROR - reading artists.json from storage:', err);
+    return {};
+  }
+}
+
+async function saveArtistsMap(map) {
+  const bucket = storage.bucket();
+  const file = bucket.file('artists.json');
+  try {
+    await file.save(JSON.stringify(map, null, 2), { contentType: 'application/json' });
+  } catch (err) {
+    console.error('🔥 | ERROR - saving artists.json to storage:', err);
+  }
+}
+
+async function ensureArtistExists(name) {
+  if (!name) return null;
+  const map = await getArtistsMap();
+  if (map[name]) {
+    console.log(`ℹ️ | Artist exists: "${name}" -> ${map[name]}`);
+    return map[name];
+  }
+  const id = crypto.randomUUID();
+  map[name] = id;
+  await saveArtistsMap(map);
+  console.log(`🆕 | Created artist entry: "${name}" -> ${id}`);
+  return id;
+}
+
+async function artistNameToId(name) {
+  if (!name) return null;
+  const map = await getArtistsMap();
+  return map[name] || null;
+}
+
+async function artistIdToName(id) {
+  if (!id) return null;
+  const map = await getArtistsMap();
+  for (const [name, aid] of Object.entries(map)) {
+    if (aid === id) return name;
+  }
+  return null;
 }
 
 //============================================================= START OF ACTUAL CODE
 
-// Load radio stations from JSON so the list is editable and can be expanded
-const radioStationsData = require(path.join(__dirname, 'radioStations.json'));
+// Single radio station configuration
+const radioStation = {
+  name: "Wildflower Radio",
+  trackList: []
+};
+console.log(`ℹ️ | Configured single radio station: ${radioStation.name}`);
 
-var RadioManager = radioStationsData.map(rs => ({
-  name: rs.name,
-  trackList: rs.trackList,
+var RadioManager = [{
+  name: radioStation.name,
+  trackList: radioStation.trackList,
   trackNum: 0,
   trackObject: { // Track object specific to this radio station
-  currentSegment: { duration: undefined, position: undefined, SRC: "" },
-  track: { segmentDurations: [], numSegments: undefined, numCurrentSegment: undefined, author: "", title: "", duration: undefined, position: undefined, SRC: "" },
+    currentSegment: { duration: undefined, position: undefined, SRC: "" },
+    track: { segmentDurations: [], numSegments: undefined, numCurrentSegment: undefined, author: "", title: "", duration: undefined, position: undefined, SRC: "" },
   },
-}));
+}];
 
 function start() {
-    RadioManager.forEach(radio => playRadioStation(radio)); // Play all stations simultaneously
+  console.log(`🟢 | Starting radio manager for ${RadioManager.length} station(s)`);
+  RadioManager.forEach(radio => console.log(`→ Station: ${radio.name}, initial trackList length: ${radio.trackList.length}`));
+  RadioManager.forEach(radio => playRadioStation(radio)); // Play all stations simultaneously
 }
 
 
 function playRadioStation(radioStation) {
+  console.log(`▶️ | playRadioStation() called for ${radioStation.name}`);
   // Use the radio object's trackNum as the authoritative current track index
   if (typeof radioStation.trackNum !== 'number') radioStation.trackNum = -1;
   // Flag to indicate immediate stop of current playback
@@ -158,6 +221,7 @@ function playRadioStation(radioStation) {
 
     // Clear stop flag when starting a new track
     radio._stopCurrent = false;
+    console.log(`ℹ️ | ${radio.name} - Reset trackObject and starting playback for ${trackTitle}`);
 
     playTrack(radio, trackTitle);
   }
@@ -178,8 +242,9 @@ function playRadioStation(radioStation) {
         radioStation._currentSleepResolver = null;
       }
     } catch (e) {
-      // ignore cancellation errors
+      console.error('🔥 | Error while stopping playback:', e);
     }
+    console.log(`⏸️ | ${radioStation.name} - _stop invoked`);
   };
 
   // Helper: cancellable sleep that can be aborted by calling radioStation._stop()
@@ -202,13 +267,16 @@ function playRadioStation(radioStation) {
       const trackData = await new Promise((resolve, reject) => { // Use Promise for getDatabaseFile
         getDatabaseFile("Tracks", trackTitle, (data) => resolve(data));
       });
+        console.log(`ℹ️ | ${radio.name} - Retrieved track data for ${trackTitle}:`, trackData);
+        if (!trackData) console.warn(`⚠️ | ${radio.name} - No trackData found for ${trackTitle}`);
 
-      radio.trackObject.track.numSegments = trackData.numChunks;
-      radio.trackObject.track.duration = trackData.duration;
-      radio.trackObject.track.title = trackData.title;
-      radio.trackObject.track.author = trackData.author;
-      radio.trackObject.track.SRC = trackData.storageReferenceURL;
-      radio.trackObject.track.segmentDurations = trackData.chunksDuration;
+      radio.trackObject.track.numSegments = trackData['Number of Segments'];
+      radio.trackObject.track.duration = trackData['Total Track Duration'];
+      radio.trackObject.track.title = trackData.Title;
+      radio.trackObject.track.author = trackData['Author Handle'];
+      radio.trackObject.track.SRC = trackData['Storage Reference URL'];
+      radio.trackObject.track.segmentDurations = trackData['Segment Durations'];
+      console.log(`ℹ️ | ${radio.name} - Track source: ${radio.trackObject.track.SRC}, segments: ${radio.trackObject.track.segmentDurations.length}`);
 
       await playSegments(radio); // Wait for all segments to play
       if (!radio._stopCurrent) {
@@ -223,6 +291,7 @@ function playRadioStation(radioStation) {
   async function playSegments(radio) {
     radio.trackObject.track.numCurrentSegment = 0;
     let currentTrackPosition = 0;
+    console.log(`ℹ️ | ${radio.name} - playSegments starting, numSegments: ${radio.trackObject.track.numSegments}`);
 
     for (let i = 1; i <= radio.trackObject.track.numSegments; i++) {
       if (radio._stopCurrent) {
@@ -233,6 +302,7 @@ function playRadioStation(radioStation) {
         radio.trackObject.currentSegment.duration = Math.trunc(
           radio.trackObject.track.segmentDurations[i - 1]
         );
+        console.log(`ℹ️ | ${radio.name} - Segment #${i} duration (truncated): ${radio.trackObject.currentSegment.duration}`);
         if (!radio.trackObject.currentSegment.duration) {
           console.warn(`⚠️ | WARN - Segment #${i} duration missing.`);
             // FIRST attempt, only works if this is the last chunk
@@ -265,9 +335,9 @@ function playRadioStation(radioStation) {
     // ... (same as before, but with the crucial position updates and logging)
     console.log(`🎵 | ${radio.name} - Playing segment #${radio.trackObject.track.numCurrentSegment}`);
       radio.trackObject.track.numCurrentSegment++;
-      const segmentData = await getStorageFile(
-        `${radio.trackObject.track.SRC}/Chunk_${radio.trackObject.track.numCurrentSegment}.mp3`
-      );
+      const chunkPath = `${radio.trackObject.track.SRC}/Chunk_${radio.trackObject.track.numCurrentSegment}.mp3`;
+      console.log(`ℹ️ | ${radio.name} - Fetching segment from storage: ${chunkPath}`);
+      const segmentData = await getStorageFile(chunkPath);
       radio.trackObject.currentSegment.SRC = segmentData;
       radio.trackObject.currentSegment.position = 0; // Reset segment position HERE
 
@@ -293,20 +363,46 @@ function playRadioStation(radioStation) {
 // ... (Admin routes remain the same)
 
 // Returns track information for *all* radio stations
-fastify.get("/getAllTrackInformation", function (request, reply) {
-    const allTrackInfo = {};
-    RadioManager.forEach(radio => {
-        allTrackInfo[radio.name] = radio.trackObject;
-    });
-    return allTrackInfo;
+fastify.get("/getAllTrackInformation", async function (request, reply) {
+  const allTrackInfo = {};
+  // Gather info for each radio and include the next track's storage URL
+  await Promise.all(RadioManager.map(async (radio) => {
+    // shallow clone trackObject to avoid mutating runtime state
+    const info = Object.assign({}, radio.trackObject);
+    let nextTrackStorageURL = null;
+    try {
+      if (Array.isArray(radio.trackList) && radio.trackList.length > 0) {
+        const nextIndex = (typeof radio.trackNum === 'number')
+          ? (radio.trackNum + 1) % radio.trackList.length
+          : 0;
+        const nextId = radio.trackList[nextIndex];
+        if (nextId) {
+          const doc = await db.collection('Tracks').doc(String(nextId)).get();
+          const data = doc.exists ? doc.data() : null;
+          if (data) {
+            nextTrackStorageURL = data['Storage Reference URL'] || data.storageReferenceURL || null;
+          }
+        }
+      }
+    } catch (err) {
+      console.error('🔥 | ERROR - fetching next track storage URL:', err);
+    }
+
+    info.nextTrackStorageURL = nextTrackStorageURL;
+    console.log(`ℹ️ | ${radio.name} - nextTrackStorageURL: ${nextTrackStorageURL}`);
+    allTrackInfo[radio.name] = info;
+  }));
+
+  reply.header('Content-Type', 'application/json');
+  return allTrackInfo;
 });
 
-// Returns names of all radio stations currently being used
+// Returns the current radio station
 fastify.get('/stations', function (request, reply) {
   try {
-    // Return the full contents of radioStations.json (name, description, trackList)
+    // Return the single radio station info (name, trackList)
     reply.header('Content-Type', 'application/json');
-    return radioStationsData;
+    return [radioStation];
   } catch (err) {
     console.error('🔥 | ERROR - getting stations:', err);
     reply.code(500).send({ error: 'Failed to fetch stations' });
@@ -323,10 +419,13 @@ fastify.get("/getAllTracks", async function (request, reply) {
       const data = doc.data() || {};
       tracks.push({
         title: doc.id,
-        author: data.author || null,
-        duration: data.duration || null,
+        author: data['Author Handle'] || null,
+        authorId: data['Author ID'] || data.authorId || null,
+        duration: data['Total Track Duration'] || null,
+        storageURL: data['Storage Reference URL'] || data.storageReferenceURL || null,
       });
     });
+    console.log(`ℹ️ | /getAllTracks returning ${tracks.length} tracks`);
     reply.header("Content-Type", "application/json");
     return tracks;
   } catch (err) {
@@ -416,22 +515,35 @@ fastify.post("/addTrack", function (request, reply) {
   }
   reply.header("Access-Control-Allow-Origin", "*");
   reply.header("Access-Control-Allow-Methods", "POST");
+  
+  // Generate a unique track ID
+  const trackID = crypto.randomUUID();
+  console.log(`🆔 | Generated Track ID: ${trackID}`);
+  
   var trackChunkDurationArray = [];
 
-function uploadTrackRefToDatabase(
+async function uploadTrackRefToDatabase(
+  trackID,
   request,
   trackChunkDurationArray,
   numChunks
 ) {
     console.log("🔘 | Trying to upload Track Ref to Database");
-  setDatabaseFile("Tracks", request.body.title, {
-    storageReferenceURL: `Tracks/${request.body.title}`,
-      title: request.body.title,
-    author: request.body.author,
-    duration: request.body.duration,
-    chunksDuration: trackChunkDurationArray,
-    numChunks: numChunks,
-  });
+  try {
+    const authorId = await ensureArtistExists(request.body.author);
+    return setDatabaseFile("Tracks", trackID, {
+      'Storage Reference URL': `Tracks/${trackID}`,
+      'Title': request.body.title,
+      'Author Handle': request.body.author,
+      'Author ID': authorId,
+      'Total Track Duration': request.body.duration,
+      'Segment Durations': trackChunkDurationArray,
+      'Number of Segments': numChunks,
+      'Time Added': new Date(),
+    });
+  } catch (err) {
+    console.error('🔥 | ERROR - uploadTrackRefToDatabase:', err);
+  }
 }
 async function uploadMP3ToFirebase(
   filePath,
@@ -455,7 +567,8 @@ async function uploadMP3ToFirebase(
         },
       })
       .then((data) => {
-        callback(data);
+        console.log(`✅ | Uploaded ${filePath} to storage at ${destination}`);
+        try { callback(data); } catch (cbErr) { console.error('🔥 | upload callback error:', cbErr); }
       });
   } catch (error) {
     console.error("Error uploading MP3:", error);
@@ -492,7 +605,7 @@ https
           console.log(`writing file: chunks/chunk-${currentChunk + 1}.mp3`)
         uploadMP3ToFirebase(
           chunkFilename,
-          `Tracks/${request.body.title}/Chunk_${currentChunk - 1}.mp3`,
+          `Tracks/${trackID}/Chunk_${currentChunk - 1}.mp3`,
           (data) => {
             // access the duration of the temporary file
             const duration = mp3Duration(chunkFilename).then((data) => {
@@ -501,16 +614,20 @@ https
                 chunkMediaDurationArray.push(data);
                 console.log("uploading track data to IB database");
                 //uploading track data to IB database
-               // uploadTrackRefToDatabase(request, trackChunkDurationArray, numChunks);
+               // uploadTrackRefToDatabase(trackID, request, trackChunkDurationArray, numChunks);
               
-               setDatabaseFile("Tracks", request.body.title, {
-                storageReferenceURL: `Tracks/${request.body.title}`,
-                title: request.body.title,
-                author: request.body.author,
-                duration: request.body.duration,
-                chunksDuration: trackChunkDurationArray,
-                numChunks: currentChunk - 1,
-              });
+               ensureArtistExists(request.body.author).then(authorId => {
+                 setDatabaseFile("Tracks", trackID, {
+                   'Storage Reference URL': `Tracks/${trackID}`,
+                   'Title': request.body.title,
+                   'Author Handle': request.body.author,
+                   'Author ID': authorId,
+                   'Total Track Duration': request.body.duration,
+                   'Segment Durations': trackChunkDurationArray,
+                   'Number of Segments': currentChunk - 1,
+                   'Time Added': new Date(),
+                 }).then(() => console.log(`✅ | Wrote interim DB entry for ${trackID} (chunks so far: ${currentChunk - 1})`)).catch(err => console.error('🔥 | ERROR - setDatabaseFile interim:', err));
+               }).catch(err => console.error('🔥 | ERROR - ensureArtistExists:', err));
        
               fs.unlinkSync(chunkFilename);
             });
@@ -527,19 +644,23 @@ https
         const duration = mp3Duration(chunkFilename).then((data) => {
             trackChunkDurationArray.push(data);
             chunkMediaDurationArray.push(data);
-             setDatabaseFile("Tracks", request.body.title, {
-                storageReferenceURL: `Tracks/${request.body.title}`,
-                title: request.body.title,
-                author: request.body.author,
-                duration: request.body.duration,
-                chunksDuration: trackChunkDurationArray,
-                numChunks: currentChunk - 1,
-              });
+               ensureArtistExists(request.body.author).then(authorId => {
+                 setDatabaseFile("Tracks", trackID, {
+                   'Storage Reference URL': `Tracks/${trackID}`,
+                   'Title': request.body.title,
+                   'Author Handle': request.body.author,
+                   'Author ID': authorId,
+                   'Total Track Duration': request.body.duration,
+                   'Segment Durations': trackChunkDurationArray,
+                   'Number of Segments': currentChunk - 1,
+                   'Time Added': new Date(),
+                 }).then(() => console.log(`✅ | Wrote interim DB entry for ${trackID} (final chunk)`)).catch(err => console.error('🔥 | ERROR - setDatabaseFile interim:', err));
+               }).catch(err => console.error('🔥 | ERROR - ensureArtistExists:', err));
         });
         fs.writeFileSync(chunkFilename, chunkData);
         uploadMP3ToFirebase(
           chunkFilename,
-          `Tracks/${request.body.title}/Chunk_${currentChunk - 1}.mp3`,
+          `Tracks/${trackID}/Chunk_${currentChunk - 1}.mp3`,
           (data) => {
             fs.unlinkSync(chunkFilename);
             // Delete the inital mp3 file
@@ -548,7 +669,7 @@ https
               console.log("🚮 | Deleted source MP3 successfully")
               );
             
-              uploadTrackRefToDatabase(request, chunkMediaDurationArray, chunkMediaDurationArray.length-1);
+              uploadTrackRefToDatabase(trackID, request, chunkMediaDurationArray, chunkMediaDurationArray.length-1);
           }
         );
         console.log(`☑️ | Chunk #${currentChunk - 1} saved to: ${chunkFilename}`);
@@ -562,7 +683,7 @@ https
     process.exit(1);
   });
 
-return; // Return nothing
+return reply.send({ success: true, trackID: trackID, title: request.body.title }); // Return the generated track ID
 });
 // Run the server and report out to the logs
 fastify.listen(
