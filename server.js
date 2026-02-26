@@ -107,58 +107,173 @@ function setDatabaseFile(collection, fileName, data) {
   return db.collection(collection).doc(fileName).set(data);
 }
 
-// Artists mapping helpers (stored in Cloud Storage as `artists.json`)
-async function getArtistsMap() {
-  const bucket = storage.bucket();
-  const file = bucket.file('artists.json');
+// ============================================================= FIRESTORE-BASED AUTHOR MANAGEMENT
+// Authors stored in Firestore under Authors/ collection
+// Each author document contains: Author Handle, Author ID, Songs (array of {id, title}), Created At
+
+async function getOrCreateAuthor(authorName) {
+  if (!authorName) {
+    console.warn(`⚠️ | getOrCreateAuthor: Author name is empty or null`);
+    return null;
+  }
+  
   try {
-    const [exists] = await file.exists();
-    if (!exists) return {};
-    const [contents] = await file.download();
-    return JSON.parse(contents.toString('utf8'));
+    console.log(`🔍 | Searching Firestore for author: "${authorName}"`);
+    
+    // Query Firestore for existing author by name
+    const snapshot = await db.collection('Authors')
+      .where('Author Handle', '==', authorName)
+      .limit(1)
+      .get();
+    
+    if (!snapshot.empty) {
+      const doc = snapshot.docs[0];
+      console.log(`✅ | Author already exists in Firestore: "${authorName}" -> ${doc.id}`);
+      console.log(`   📊 | Current songs count: ${doc.data()['Songs']?.length || 0}`);
+      return { id: doc.id, data: doc.data() };
+    }
+    
+    // Create new author
+    console.log(`🆕 | Author not found. Creating new author: "${authorName}"`);
+    const authorId = crypto.randomUUID();
+    const authorData = {
+      'Author Handle': authorName,
+      'Author ID': authorId,
+      'Songs': [], // Array of {id, title}
+      'Created At': new Date(),
+    };
+    
+    await db.collection('Authors').doc(authorId).set(authorData);
+    console.log(`✅ | Successfully created new author in Firestore`);
+    console.log(`   📝 | Author Handle: ${authorName}`);
+    console.log(`   🆔 | Author ID: ${authorId}`);
+    return { id: authorId, data: authorData };
   } catch (err) {
-    console.error('🔥 | ERROR - reading artists.json from storage:', err);
-    return {};
+    console.error(`🔥 | ERROR in getOrCreateAuthor for "${authorName}":`, err.message);
+    console.error(`   Stack: ${err.stack}`);
+    return null;
   }
 }
 
-async function saveArtistsMap(map) {
-  const bucket = storage.bucket();
-  const file = bucket.file('artists.json');
+async function addSongToAuthor(authorId, songId, songTitle) {
+  if (!authorId || !songId || !songTitle) {
+    console.warn(
+      `⚠️ | addSongToAuthor: Missing required parameters\n` +
+      `   authorId: ${authorId ? '✓' : '✗'}, songId: ${songId ? '✓' : '✗'}, songTitle: ${songTitle ? '✓' : '✗'}`
+    );
+    return false;
+  }
+  
   try {
-    await file.save(JSON.stringify(map, null, 2), { contentType: 'application/json' });
+    console.log(`📝 | Adding song to author: authorId=${authorId.substring(0, 8)}...`);
+    console.log(`   🎵 | Song: "${songTitle}" (${songId.substring(0, 8)}...)`);
+    
+    const authorRef = db.collection('Authors').doc(authorId);
+    const doc = await authorRef.get();
+    
+    if (!doc.exists) {
+      console.warn(`⚠️ | Author document does not exist in Firestore: ${authorId}`);
+      return false;
+    }
+    
+    const authorData = doc.data();
+    const songs = Array.isArray(authorData['Songs']) ? authorData['Songs'] : [];
+    const authorHandle = authorData['Author Handle'] || 'Unknown';
+    
+    // Check if song already exists
+    const songExists = songs.some(s => s.id === songId);
+    if (songExists) {
+      console.log(`ℹ️ | Song already in author's collection. Skipping duplicate.`);
+      console.log(`   👤 | Author: ${authorHandle}`);
+      console.log(`   🎵 | Song: ${songTitle}`);
+      return true;
+    }
+    
+    // Add song to author's list
+    songs.push({ id: songId, title: songTitle });
+    await authorRef.update({ 'Songs': songs });
+    console.log(`✅ | Successfully added song to author`);
+    console.log(`   👤 | Author: ${authorHandle}`);
+    console.log(`   🎵 | Song: ${songTitle}`);
+    console.log(`   📊 | Total songs for author: ${songs.length}`);
+    return true;
   } catch (err) {
-    console.error('🔥 | ERROR - saving artists.json to storage:', err);
+    console.error(`🔥 | ERROR in addSongToAuthor:`, err.message);
+    console.error(`   Stack: ${err.stack}`);
+    return false;
   }
 }
 
-async function ensureArtistExists(name) {
-  if (!name) return null;
-  const map = await getArtistsMap();
-  if (map[name]) {
-    console.log(`ℹ️ | Artist exists: "${name}" -> ${map[name]}`);
-    return map[name];
+async function getAuthorByHandle(authorHandle) {
+  if (!authorHandle) {
+    console.warn(`⚠️ | getAuthorByHandle: Author handle is empty`);
+    return null;
   }
-  const id = crypto.randomUUID();
-  map[name] = id;
-  await saveArtistsMap(map);
-  console.log(`🆕 | Created artist entry: "${name}" -> ${id}`);
-  return id;
+  
+  try {
+    console.log(`🔍 | Fetching author by handle: "${authorHandle}"`);
+    
+    const snapshot = await db.collection('Authors')
+      .where('Author Handle', '==', authorHandle)
+      .limit(1)
+      .get();
+    
+    if (!snapshot.empty) {
+      const doc = snapshot.docs[0];
+      console.log(`✅ | Found author: ID=${doc.id.substring(0, 8)}..., Songs=${doc.data()['Songs']?.length || 0}`);
+      return { id: doc.id, data: doc.data() };
+    }
+    
+    console.log(`ℹ️ | Author not found: "${authorHandle}"`);
+    return null;
+  } catch (err) {
+    console.error(`🔥 | ERROR in getAuthorByHandle:`, err.message);
+    return null;
+  }
 }
 
-async function artistNameToId(name) {
-  if (!name) return null;
-  const map = await getArtistsMap();
-  return map[name] || null;
+async function getAllAuthors() {
+  try {
+    console.log(`📚 | Fetching all authors from Firestore...`);
+    
+    const snapshot = await db.collection('Authors').get();
+    const authors = [];
+    snapshot.forEach(doc => {
+      authors.push({ id: doc.id, ...doc.data() });
+    });
+    
+    console.log(`✅ | Retrieved ${authors.length} author(s) from Firestore`);
+    authors.forEach((author, idx) => {
+      console.log(`   ${idx + 1}. "${author['Author Handle']}" - ${author['Songs']?.length || 0} song(s)`);
+    });
+    return authors;
+  } catch (err) {
+    console.error(`🔥 | ERROR in getAllAuthors:`, err.message);
+    return [];
+  }
 }
 
-async function artistIdToName(id) {
-  if (!id) return null;
-  const map = await getArtistsMap();
-  for (const [name, aid] of Object.entries(map)) {
-    if (aid === id) return name;
+async function getAuthorById(authorId) {
+  if (!authorId) {
+    console.warn(`⚠️ | getAuthorById: Author ID is empty`);
+    return null;
   }
-  return null;
+  
+  try {
+    console.log(`🔍 | Fetching author by ID: ${authorId.substring(0, 8)}...`);
+    
+    const doc = await db.collection('Authors').doc(authorId).get();
+    if (doc.exists) {
+      console.log(`✅ | Found author: "${doc.data()['Author Handle']}"`);
+      return { id: doc.id, data: doc.data() };
+    }
+    
+    console.log(`ℹ️ | Author not found with ID: ${authorId}`);
+    return null;
+  } catch (err) {
+    console.error(`🔥 | ERROR in getAuthorById:`, err.message);
+    return null;
+  }
 }
 
 //============================================================= START OF ACTUAL CODE
@@ -655,12 +770,24 @@ https
           }
         }
 
-        // All chunks processed, write final DB entry
-        console.log(`🎨 | Looking up/creating artist: "${request.body.author}"...`);
-        const authorId = await ensureArtistExists(request.body.author);
-        console.log(`🎨 | Artist resolved: "${request.body.author}" -> ${authorId}`);
+        // All chunks processed, manage author and write final DB entry
+        console.log(`\n🎨 | ══════════════════════════════════════════`);
+        console.log(`🎨 | Setting up author in Firestore`);
+        console.log(`🎨 | ══════════════════════════════════════════`);
         
-        console.log(`📁 | Writing FINAL DB entry for ${trackID} (${chunks.length} segments)...`);
+        const authorResult = await getOrCreateAuthor(request.body.author);
+        
+        if (!authorResult) {
+          throw new Error(`Failed to create/get author: ${request.body.author}`);
+        }
+        
+        const authorId = authorResult.id;
+        console.log(`✅ | Author ready: ID=${authorId.substring(0, 8)}...`);
+        
+        console.log(`\n📁 | ══════════════════════════════════════════`);
+        console.log(`📁 | Writing Track metadata to Firestore`);
+        console.log(`📁 | ══════════════════════════════════════════`);
+        
         await setDatabaseFile("Tracks", trackID, {
           'Storage Reference URL': `Tracks/${trackID}`,
           'Title': request.body.title,
@@ -671,7 +798,24 @@ https
           'Number of Segments': chunks.length,
           'Time Added': new Date(),
         });
-        console.log(`✅ | FINAL DB entry written: trackID=${trackID}, segments=${chunks.length}, durations=${trackChunkDurationArray.length}`);
+        console.log(`✅ | Track metadata written successfully`);
+        console.log(`   🆔 | Track ID: ${trackID}`);
+        console.log(`   📝 | Title: ${request.body.title}`);
+        console.log(`   👤 | Author: ${request.body.author}`);
+        console.log(`   📊 | Segments: ${chunks.length}`);
+        console.log(`   ⏱️  | Duration: ${request.body.duration}s`);
+        
+        // Add song to author's song list
+        console.log(`\n📋 | ══════════════════════════════════════════`);
+        console.log(`📋 | Adding song to author's collection`);
+        console.log(`📋 | ══════════════════════════════════════════`);
+        
+        const songAdded = await addSongToAuthor(authorId, trackID, request.body.title);
+        if (songAdded) {
+          console.log(`✅ | Song successfully added to author's collection`);
+        } else {
+          console.warn(`⚠️ | Could not add song to author's collection (but track was saved to Firestore)`);
+        }
 
         // Attempt to clean up source file from storage
         console.log(`🗑️ | Deleting source from storage: Tracks/FreshlyUploadedMP3File`);
@@ -701,6 +845,102 @@ https
 
 // Note: response is sent asynchronously after all processing completes
 });
+
+// ============================================================= TEST & ADMIN ENDPOINTS
+
+// Endpoint to get all authors with their songs
+fastify.get("/getAllAuthors", async function (request, reply) {
+  try {
+    console.log(`📡 | GET /getAllAuthors requested`);
+    const authors = await getAllAuthors();
+    reply.header('Content-Type', 'application/json');
+    console.log(`✅ | Returning ${authors.length} author(s)`);
+    return { success: true, count: authors.length, authors: authors };
+  } catch (err) {
+    console.error('🔥 | ERROR - /getAllAuthors:', err.message);
+    return reply.code(500).send({ error: 'Failed to fetch authors' });
+  }
+});
+
+// Endpoint to get a specific author by handle
+fastify.get("/getAuthor/:handle", async function (request, reply) {
+  try {
+    const handle = decodeURIComponent(request.params.handle);
+    console.log(`📡 | GET /getAuthor/${handle} requested`);
+    
+    if (!handle) {
+      return reply.code(400).send({ error: 'Author handle is required' });
+    }
+    
+    const author = await getAuthorByHandle(handle);
+    if (!author) {
+      console.log(`⚠️ | Author not found: ${handle}`);
+      return reply.code(404).send({ error: `Author not found: ${handle}` });
+    }
+    
+    reply.header('Content-Type', 'application/json');
+    console.log(`✅ | Author found with ${author.data['Songs']?.length || 0} songs`);
+    return { success: true, author: author };
+  } catch (err) {
+    console.error('🔥 | ERROR - /getAuthor:', err.message);
+    return reply.code(500).send({ error: 'Failed to fetch author' });
+  }
+});
+
+// Endpoint to manually create an author
+fastify.post("/createAuthor", async function (request, reply) {
+  try {
+    const authorName = request.body?.authorName;
+    console.log(`📡 | POST /createAuthor requested for: ${authorName}`);
+    
+    if (!authorName) {
+      return reply.code(400).send({ error: 'authorName is required' });
+    }
+    
+    const author = await getOrCreateAuthor(authorName);
+    if (!author) {
+      console.log(`❌ | Failed to create author: ${authorName}`);
+      return reply.code(500).send({ error: 'Failed to create author' });
+    }
+    
+    console.log(`✅ | Author endpoint response prepared`);
+    return { success: true, author: { id: author.id, ...author.data } };
+  } catch (err) {
+    console.error('🔥 | ERROR - /createAuthor:', err.message);
+    return reply.code(500).send({ error: 'Failed to create author', details: err.message });
+  }
+});
+
+// Endpoint to manually add a song to an author
+fastify.post("/addSongToAuthor", async function (request, reply) {
+  try {
+    const { authorId, songId, songTitle } = request.body || {};
+    console.log(`📡 | POST /addSongToAuthor requested`);
+    console.log(`   authorId: ${authorId?.substring(0, 8)}...`);
+    console.log(`   songId: ${songId?.substring(0, 8)}...`);
+    console.log(`   songTitle: ${songTitle}`);    
+    if (!authorId || !songId || !songTitle) {
+      return reply.code(400).send({ 
+        error: 'authorId, songId, and songTitle are all required',
+        provided: { authorId, songId, songTitle }
+      });
+    }
+    
+    const success = await addSongToAuthor(authorId, songId, songTitle);
+    console.log(`${success ? '✅' : '❌'} | Song endpoint result: success=${success}`);
+    return {
+      success: success,
+      message: success ? 'Song added to author' : 'Failed to add song to author',
+      authorId: authorId,
+      songId: songId,
+      songTitle: songTitle
+    };
+  } catch (err) {
+    console.error('🔥 | ERROR - /addSongToAuthor:', err.message);
+    return reply.code(500).send({ error: 'Failed to add song to author', details: err.message });
+  }
+});
+
 // Run the server and report out to the logs
 fastify.listen(
     { port: process.env.PORT, host: "0.0.0.0" },
