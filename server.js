@@ -140,6 +140,9 @@ async function getOrCreateAuthor(authorName) {
       'Author Handle': authorName,
       'Author ID': authorId,
       'Songs': [], // Array of {id, title}
+      'Description': '', // Optional field for future use
+      'profileImageURL': '', // Optional field for future use
+      'genres': [], // Optional field for future use
       'Created At': new Date(),
     };
     
