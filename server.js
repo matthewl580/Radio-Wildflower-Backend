@@ -392,7 +392,7 @@ async function getAuthorById(authorId) {
 // Single radio station configuration
 const radioStation = {
   name: "Wildflower Radio",
-  trackList: [],
+  trackList: ["5d7866c2-ad4d-4040-a6b4-b672f5b4faff"],
 };
 console.log(`ℹ️ | Configured single radio station: ${radioStation.name}`);
 
