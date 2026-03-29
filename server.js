@@ -92,7 +92,6 @@ async function deleteStorageFile(filePath, callback = () => {}) {
 }
 
 const db = getFirestore();
-
 function getDatabaseFile(collection, fileName, func = () => {}) {
   db.collection(collection)
     .doc(fileName)
@@ -101,6 +100,15 @@ function getDatabaseFile(collection, fileName, func = () => {}) {
       func(doc.data());
       return doc.data();
     });
+  }
+async function getTrackData(trackTitle) {
+  try {
+    const doc = await db.collection("Tracks").doc(trackTitle).get();
+    return doc.exists ? doc.data() : null;
+  } catch (err) {
+    console.error(`🔥 | getTrackData error for ${trackTitle}:`, err);
+    return null;
+  }
 }
 
 function setDatabaseFile(collection, fileName, data) {
@@ -395,8 +403,6 @@ function start() {
   RadioManager.forEach((radio) => playRadioStation(radio)); // Play all stations simultaneously
 }
 
-
-
 function playRadioStation(radioStation) {
   console.log(`▶️ | playRadioStation() called for ${radioStation.name}`);
   // Use the radio object's trackNum as the authoritative current track index
@@ -452,10 +458,7 @@ function playRadioStation(radioStation) {
     console.log(`🎵 | ${radio.name} - Playing track: ${trackTitle}`);
 
     try {
-      const trackData = await new Promise((resolve, reject) => {
-        // Use Promise for getDatabaseFile
-        getDatabaseFile("Tracks", trackTitle, (data) => resolve(data));
-      });
+      const trackData = await getTrackData(trackTitle);
       console.log(
         `ℹ️ | ${radio.name} - Retrieved track data for ${trackTitle}:`,
         trackData,
@@ -500,103 +503,102 @@ function playRadioStation(radioStation) {
     radio.trackObject.track.numCurrentSegment = 0;
     let currentTrackPosition = 0;
     console.log(
-      `ℹ️ | ${radio.name} - playSegments starting, numSegments: ${radio.trackObject.track.numSegments}`,
+      `ℹ️ | ${radio.name} - playSegments starting with ${radio.trackObject.track.numSegments} segments`,
     );
 
-    for (let i = 1; i <= radio.trackObject.track.numSegments; i++) {
+    for (
+      let segNum = 1;
+      segNum <= radio.trackObject.track.numSegments;
+      segNum++
+    ) {
       if (radio._stopCurrent) {
-        console.log(`⏹️ | ${radio.name} - Playback stopped mid-track.`);
+        console.log(`⏹️ | ${radio.name} - Stopped during segment ${segNum}`);
         break;
       }
 
+      radio.trackObject.track.numCurrentSegment = segNum;
       radio.trackObject.currentSegment.duration = Math.trunc(
-        radio.trackObject.track.segmentDurations[i - 1],
+        radio.trackObject.track.segmentDurations[segNum - 1],
       );
-    }
-    radio.isPlaying = false;
 
-    console.log(
-      `ℹ️ | ${radio.name} - Segment #${i} duration (truncated): ${radio.trackObject.currentSegment.duration}`,
-    );
-    if (!radio.trackObject.currentSegment.duration) {
-      console.warn(`⚠️ | WARN - Segment #${i} duration missing.`);
-      // FIRST attempt, only works if this is the last chunk
+      // Fix duration fallback
       if (
-        radio.trackObject.numCurrentSegment >= radio.trackObject.numSegments
+        !radio.trackObject.currentSegment.duration ||
+        isNaN(radio.trackObject.currentSegment.duration)
       ) {
-        radio.trackObject.currentSegment.duration =
-          1 +
-          (radio.trackObject.track.duration -
-            radio.trackObject.numCurrentSegment *
-              (radio.trackObject.numSegments - 1));
-        console.log("RECIFING with last segment duration calculations (safe)");
-      } else {
-        // so we may not be at the last segment, lets use the one before us as a placeholder
-        if (radio.trackObject.numCurrentSegment != 0) {
-          radio.trackObject.currentSegment.duration =
-            radio.trackObject.track.segmentDurations[
-              radio.trackObject.numCurrentSegment - 1
-            ];
-          console.log("RECIFING using previous segment length");
-        } else {
-          // there is nothing we can do
-          radio.trackObject.currentSegment.duration = 28;
-          console.log("RECIFING FAILED. Forcing duration to be 28 seconds");
-        }
+        radio.trackObject.currentSegment.duration = 30; // default
+        console.log(`⚠️ | Fixed invalid duration for segment ${segNum}`);
       }
+
+      console.log(
+        `🎵 | ${radio.name} - Playing segment #${segNum}/${radio.trackObject.track.numSegments} (${radio.trackObject.currentSegment.duration}s)`,
+      );
+
+      await playSegment(
+        radio,
+        radio.trackObject.currentSegment,
+        currentTrackPosition,
+      );
+      currentTrackPosition += radio.trackObject.currentSegment.duration;
     }
-    await playSegment(
-      radio,
-      radio.trackObject.currentSegment,
-      currentTrackPosition,
-    );
-    currentTrackPosition += radio.trackObject.currentSegment.duration;
+
+    radio.isPlaying = false;
+    console.log(`✅ | ${radio.name} - All segments complete`);
   }
 }
 
 async function playSegment(radio, segment, trackPosition) {
-  // ... (same as before, but with the crucial position updates and logging)
+  radio.trackObject.track.numCurrentSegment =
+    segment.num || radio.trackObject.track.numCurrentSegment;
+  const chunkNum = radio.trackObject.track.numCurrentSegment;
+  const chunkPath = `${radio.trackObject.track.SRC}/Chunk_${chunkNum}.mp3`;
+
   console.log(
-    `🎵 | ${radio.name} - Playing segment #${radio.trackObject.track.numCurrentSegment}`,
+    `🎵 | ${radio.name} - Segment #${chunkNum}: ${segment.duration}s @ trackPos ${trackPosition}s`,
   );
-  radio.trackObject.track.numCurrentSegment++;
-  const chunkPath = `${radio.trackObject.track.SRC}/Chunk_${radio.trackObject.track.numCurrentSegment}.mp3`;
-  console.log(
-    `ℹ️ | ${radio.name} - Fetching segment from storage: ${chunkPath}`,
-  );
-  const segmentData = await getStorageFile(chunkPath);
-  radio.trackObject.currentSegment.SRC = segmentData;
-  radio.trackObject.currentSegment.position = 0; // Reset segment position HERE
 
-  // Simulate playback and position tracking (REPLACE THIS WITH ACTUAL AUDIO PLAYBACK LOGIC)
-  const startTime = Date.now();
-  for (let position = 0; position < segment.duration; position++) {
-    if (radio._stopCurrent) {
-      console.log(
-        `⏹️ | ${radio.name} - Stopping segment playback at ${position}s.`,
-      );
-      break;
+  try {
+    const segmentSRC = await getStorageFile(chunkPath);
+    radio.trackObject.currentSegment.SRC = segmentSRC;
+    radio.trackObject.currentSegment.position = 0;
+    radio.trackObject.currentSegment.duration = segment.duration;
+    radio.isPlaying = true;
+
+    // Simulate playback (1s intervals)
+    const startTime = Date.now();
+    for (let pos = 0; pos < segment.duration; pos++) {
+      if (radio._stopCurrent) {
+        console.log(
+          `⏹️ | ${radio.name} - Stopped at ${pos}/${segment.duration}s`,
+        );
+        break;
+      }
+      if (radio._finishCurrentSegment && pos >= segment.duration - 2) {
+        console.log(`🎯 | ${radio.name} - Gentle finish at ${pos}s`);
+        break;
+      }
+
+      // Update positions
+      radio.trackObject.currentSegment.position = pos + 1;
+      radio.trackObject.track.position = trackPosition + pos + 1;
+
+      // Log every 10s or at end
+      if (pos % 10 === 0 || pos === segment.duration - 1) {
+        const timeStr = new Date().toISOString().slice(11, 19);
+        console.log(
+          `[${timeStr}] 🎵 ${radio.name} | ${radio.trackObject.track.title} | ` +
+            `${radio.trackObject.track.position}/${radio.trackObject.track.duration}s | ` +
+            `Seg ${chunkNum}: ${radio.trackObject.currentSegment.position}/${segment.duration}s`,
+        );
+      }
+
+      await cancellableSleep(radio, 1000);
     }
-    if (radio._finishCurrentSegment && position >= segment.duration - 2) {
-      console.log(
-        `🎯 | ${radio.name} - Finishing current segment due to gentleStop at ${position}s`,
-      );
-    }
 
-    // Log every second with structured format
-    const elapsed = Date.now() - startTime;
-    const timeStr = new Date().toISOString().slice(11, 19);
-    const trackProgress = `${radio.trackObject.track.position + position}/${radio.trackObject.track.duration}s`;
-    const segmentProgress = `${position}/${segment.duration}s`;
-
-    console.log(
-      `[${timeStr}] 🎵 ${radio.name} | ${radio.trackObject.track.author} - ${radio.trackObject.track.title} | Track:${trackProgress} | Segment:${segmentProgress}`,
-    );
-
-    radio.trackObject.currentSegment.position = position + 1;
-    radio.trackObject.track.position = trackPosition + position + 1;
-
-    await cancellableSleep(radio, 1000);
+    console.log(`✅ | ${radio.name} - Segment #${chunkNum} complete`);
+  } catch (err) {
+    console.error(`🔥 | ${radio.name} - playSegment error:`, err);
+    radio.isPlaying = false;
   }
 }
 
@@ -1010,6 +1012,24 @@ fastify.post("/addTrack", function (request, reply) {
           console.log(`   📊 | Segments: ${chunks.length}`);
           console.log(`   ⏱️  | Duration: ${request.body.duration}s`);
 
+          // AUTO-PLAY NEW TRACK if trackList empty
+          const radio = RadioManager[0];
+          let autoPlayed = false;
+          if (Array.isArray(radio.trackList) && radio.trackList.length === 0) {
+            console.log(
+              `🎵 | TrackList empty! Auto-adding & playing: ${trackID}`,
+            );
+            radio.trackList = [trackID];
+            radio.pendingTrackList = null;
+            radio.trackNum = -1;
+            nextTrack(radio);
+            autoPlayed = true;
+          } else {
+            console.log(
+              `ℹ️ | Track saved (trackList not empty). ID: ${trackID}`,
+            );
+          }
+
           // Add song to author's song list
           console.log(`\n📋 | ══════════════════════════════════════════`);
           console.log(`📋 | Adding song to author's collection`);
@@ -1053,6 +1073,7 @@ fastify.post("/addTrack", function (request, reply) {
             trackID: trackID,
             title: request.body.title,
             chunks: chunks.length,
+            autoPlayed: autoPlayed,
           });
         } catch (err) {
           console.error(`🔥 | FATAL ERROR in chunk processing:`, err);
