@@ -1301,3 +1301,4 @@ fastify.listen(
     start(); // Start playing all radio stations
   },
 );
+}
