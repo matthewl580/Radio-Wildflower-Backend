@@ -634,18 +634,8 @@ fastify.get("/getAllTrackInformation", async function (request, reply) {
                 null;
             }
           }
-        }
-      } catch (err) {
-        console.error("🔥 | ERROR - fetching next track storage URL:", err);
-      }
+        
 
-      info.nextTrackStorageURL = nextTrackStorageURL;
-      console.log(
-        `ℹ️ | ${radio.name} - nextTrackStorageURL: ${nextTrackStorageURL}`,
-      );
-      allTrackInfo[radio.name] = info;
-    }),
-  );
 
   reply.header("Content-Type", "application/json");
   return allTrackInfo;
@@ -694,10 +684,10 @@ fastify.get("/getAllTracks", async function (request, reply) {
 // Expects JSON body: { stationName: string, trackList: string[] | string }
 fastify.post("/admin/editTrackList", async function (request, reply) {
   const body = request.body || {};
-  console.log(
-    `📝 | /admin/editTrackList: Old trackList length for ${stationName}: ${radio.trackList?.length || 0}`,
-  );
   const stationName = body.stationName;
+  console.log(
+    `📝 | /admin/editTrackList: Old trackList length for ${stationName}: ${RadioManager.find(r => r.name === stationName)?.trackList?.length || 0}`,
+  );
   const trackList = body.trackList;
   console.log("DEBUG: Received editTrackList request:", body);
   if (!stationName) {
@@ -735,8 +725,8 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
   const oldList = [...radio.trackList]; // shallow copy
   const addedSongs = newList.filter(id => !oldList.includes(id));
   const deletedSongs = oldList.filter(id => !newList.includes(id));
-  console.log(`➕ | Added songs (${addedSongs.length}): ${addedSongs.slice(0,3).join(', ') ${addedSongs.length > 3 ? '...' : ''}}`);
-  console.log(`➖ | Deleted songs (${deletedSongs.length}): ${deletedSongs.slice(0,3).join(', ') ${deletedSongs.length > 3 ? '...' : ''}}`);
+  console.log(`➕ | Added songs (${addedSongs.length}): ${addedSongs.slice(0,3).join(', ')} ${addedSongs.length > 3 ? '...' : ''}`);
+  console.log(`➖ | Deleted songs (${deletedSongs.length}): ${deletedSongs.slice(0,3).join(', ')} ${deletedSongs.length > 3 ? '...' : ''}`);
 
   // Set pending instead of direct update
   radio.pendingTrackList = newList;
