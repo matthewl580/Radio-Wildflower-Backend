@@ -116,7 +116,7 @@ function setDatabaseFile(collection, fileName, data) {
   // Return the Promise so callers can await this operation
   return db.collection(collection).doc(fileName).set(data);
 }
-function nextTrack(radio) {
+async function nextTrack(radio) {
   // Check for pending tracklist first
   if (
     radio.pendingTrackList &&
@@ -133,6 +133,7 @@ function nextTrack(radio) {
 
   if (!Array.isArray(radio.trackList) || radio.trackList.length === 0) {
     console.warn(`⚠️ | ${radio.name} has empty trackList.`);
+    radio.isPlaying = false;
     return;
   }
 
@@ -140,11 +141,11 @@ function nextTrack(radio) {
   const trackTitle = radio.trackList[radio.trackNum];
 
   console.log(
-    `⏭️ | ${radio.name} - Playing next track (Track #${radio.trackNum + 1}): ${trackTitle}`,
+    `⏭️ | ${radio.name} - Next track (Track #${radio.trackNum + 1}): ${trackTitle}`,
   );
 
+  // Reset structure but fetch data immediately to avoid empty API responses
   radio.trackObject = {
-    // Reset the ENTIRE trackObject
     currentSegment: { duration: 0, position: 0, SRC: "" },
     track: {
       segmentDurations: [],
@@ -158,15 +159,42 @@ function nextTrack(radio) {
     },
   };
 
-  // Clear stop flag when starting a new track
+  // Clear stop flag
   radio._stopCurrent = false;
+
+  try {
+    // Load track metadata immediately
+    const trackData = await getTrackData(trackTitle);
+    if (trackData) {
+      radio.trackObject.track.numSegments =
+        trackData["Number of Segments"] || 0;
+      radio.trackObject.track.duration = trackData["Total Track Duration"] || 0;
+      radio.trackObject.track.title = trackData.Title || trackTitle;
+      radio.trackObject.track.author = trackData["Author Handle"] || "Unknown";
+      radio.trackObject.track.SRC = trackData["Storage Reference URL"] || "";
+      radio.trackObject.track.segmentDurations =
+        trackData["Segment Durations"] || [];
+      console.log(
+        `✅ | ${radio.name} - Loaded track info: ${radio.trackObject.track.title} by ${radio.trackObject.track.author}`,
+      );
+    } else {
+      console.warn(
+        `⚠️ | ${radio.name} - No data for ${trackTitle}, using defaults`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      `🔥 | ${radio.name} - Error loading track data:`,
+      err.message,
+    );
+  }
+
   console.log(
-    `ℹ️ | ${radio.name} - Reset trackObject and starting playback for ${trackTitle}`,
+    `ℹ️ | ${radio.name} - trackObject ready for ${trackTitle}, starting playback`,
   );
 
   radio.isPlaying = true;
-
-  playTrack(radio, trackTitle);
+  playSegments(radio); // Start segments immediately with pre-loaded data
 }
 // ============================================================= FIRESTORE-BASED AUTHOR MANAGEMENT
 // Authors stored in Firestore under Authors/ collection
@@ -739,11 +767,9 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
     // Find the radio station in the in-memory RadioManager
     const radio = RadioManager.find((r) => r.name === stationName);
     if (!radio) {
-      return reply
-        .code(404)
-        .send({
-          error: `radio station "${stationName}" not found. Available: ${RadioManager.map((r) => r.name).join(", ")}`,
-        });
+      return reply.code(404).send({
+        error: `radio station "${stationName}" not found. Available: ${RadioManager.map((r) => r.name).join(", ")}`,
+      });
     }
 
     // Ensure isPlaying is boolean
