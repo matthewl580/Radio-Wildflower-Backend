@@ -767,7 +767,7 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
   });
 });
 
-// Returns track position for *all* radio stations
+// Returns detailed track position + progress for *all* radio stations (includes % progress, current track)
 fastify.get("/getAllTrackPositions", function (request, reply) {
   const allTrackPositions = {};
   RadioManager.forEach((radio) => {
