@@ -90,9 +90,7 @@ async function deleteStorageFile(filePath, callback = () => {}) {
       callback(data);
     });
 }
-
-const db = getFirestore();
-function getDatabaseFile(collection, fileName, func = () => {}) {
+/*function getDatabaseFile(collection, fileName, func = () => {}) {
   db.collection(collection)
     .doc(fileName)
     .get()
@@ -100,7 +98,9 @@ function getDatabaseFile(collection, fileName, func = () => {}) {
       func(doc.data());
       return doc.data();
     });
-  }
+  }*/
+const db = getFirestore();
+// Removed dead getDatabaseFile - using getTrackData
 async function getTrackData(trackTitle) {
   try {
     const doc = await db.collection("Tracks").doc(trackTitle).get();
@@ -400,151 +400,155 @@ function start() {
       `→ Station: ${radio.name}, initial trackList length: ${radio.trackList.length}`,
     ),
   );
-  RadioManager.forEach((radio) => playRadioStation(radio)); // Play all stations simultaneously
+  RadioManager.forEach((radio) => playRadioStation(radio)); // Initialize _nextTrack etc.
 }
 
 function playRadioStation(radioStation) {
-  console.log(`▶️ | playRadioStation() called for ${radioStation.name}`);
-  // Use the radio object's trackNum as the authoritative current track index
-  if (typeof radioStation.trackNum !== "number") radioStation.trackNum = -1;
-  // Flag to indicate immediate stop of current playback
-  radioStation._stopCurrent = false;
-
-  // Expose nextTrack so external code (admin endpoint) can trigger immediate start
+  // Setup methods once
   radioStation._nextTrack = () => nextTrack(radioStation);
-
-  // Clear gentle stop flags when starting new track
-  radioStation._finishCurrentSegment = false;
-  radioStation._gentleStop = () => {
-    radioStation._finishCurrentSegment = true;
-    console.log(
-      `⏸️ | ${radioStation.name} - gentleStop invoked (finish current segment)`,
-    );
-  };
-
   radioStation._stop = () => {
-    radioStation._stopCurrent = true;
-    // If a cancellable sleep is active, cancel it to stop immediately
-    try {
-      if (radioStation._currentSleepTimer) {
-        clearTimeout(radioStation._currentSleepTimer);
-        radioStation._currentSleepTimer = null;
-      }
-      if (typeof radioStation._currentSleepResolver === "function") {
-        // Resolve the pending sleep so any awaiting logic continues immediately
-        radioStation._currentSleepResolver();
-        radioStation._currentSleepResolver = null;
-      }
-    } catch (e) {
-      console.error("🔥 | Error while stopping playback:", e);
-    }
-    console.log(`⏸️ | ${radioStation.name} - _stop invoked`);
+    radioStation._stopCurrent = true; /* cleanup timers */
   };
+  // ... rest unchanged
+}
+console.log(`▶️ | playRadioStation() called for ${radioStation.name}`);
+// Use the radio object's trackNum as the authoritative current track index
+if (typeof radioStation.trackNum !== "number") radioStation.trackNum = -1;
+// Flag to indicate immediate stop of current playback
+radioStation._stopCurrent = false;
 
-  // Helper: cancellable sleep that can be aborted by calling radioStation._stop()
-  function cancellableSleep(radio, ms) {
-    return new Promise((resolve) => {
-      // store resolver and timer on the radio object so _stop can cancel
-      radio._currentSleepResolver = resolve;
-      radio._currentSleepTimer = setTimeout(() => {
-        radio._currentSleepResolver = null;
-        radio._currentSleepTimer = null;
-        resolve();
-      }, ms);
-    });
-  }
+// Expose nextTrack so external code (admin endpoint) can trigger immediate start
+radioStation._nextTrack = () => nextTrack(radioStation);
 
-  async function playTrack(radio, trackTitle) {
-    console.log(`🎵 | ${radio.name} - Playing track: ${trackTitle}`);
+// Clear gentle stop flags when starting new track
+radioStation._finishCurrentSegment = false;
+radioStation._gentleStop = () => {
+  radioStation._finishCurrentSegment = true;
+  console.log(
+    `⏸️ | ${radioStation.name} - gentleStop invoked (finish current segment)`,
+  );
+};
 
-    try {
-      const trackData = await getTrackData(trackTitle);
-      console.log(
-        `ℹ️ | ${radio.name} - Retrieved track data for ${trackTitle}:`,
-        trackData,
-      );
-      if (!trackData)
-        console.warn(
-          `⚠️ | ${radio.name} - No trackData found for ${trackTitle}`,
-        );
-
-      radio.trackObject.track.numSegments = trackData["Number of Segments"];
-      radio.trackObject.track.duration = trackData["Total Track Duration"];
-      radio.trackObject.track.title = trackData.Title;
-      radio.trackObject.track.author = trackData["Author Handle"];
-      radio.trackObject.track.SRC = trackData["Storage Reference URL"];
-      radio.trackObject.track.segmentDurations = trackData["Segment Durations"];
-      console.log(
-        `ℹ️ | ${radio.name} - Track source: ${radio.trackObject.track.SRC}, segments: ${radio.trackObject.track.segmentDurations.length}`,
-      );
-
-      await playSegments(radio); // Wait for all segments to play
-      // Check for pending tracklist after segments complete
-      if (radio.pendingTrackList && !radio._stopCurrent) {
-        console.log(
-          `🔄 | ${radio.name} - Applying pending trackList after track end`,
-        );
-        radio.trackList = radio.pendingTrackList;
-        radio.pendingTrackList = null;
-        radio.trackNum = -1;
-        radio._finishCurrentSegment = false;
-        radio._nextTrack();
-      }
-      if (!radio._stopCurrent) {
-        nextTrack(radio); // Go to the next track *after* playSegments completes if not stopped
-      }
-    } catch (error) {
-      console.error(`🔥 | ERROR - Getting track data: ${error.message}`);
-      if (!radio._stopCurrent) nextTrack(radio); // Even on error, proceed to the next track
+radioStation._stop = () => {
+  radioStation._stopCurrent = true;
+  // If a cancellable sleep is active, cancel it to stop immediately
+  try {
+    if (radioStation._currentSleepTimer) {
+      clearTimeout(radioStation._currentSleepTimer);
+      radioStation._currentSleepTimer = null;
     }
+    if (typeof radioStation._currentSleepResolver === "function") {
+      // Resolve the pending sleep so any awaiting logic continues immediately
+      radioStation._currentSleepResolver();
+      radioStation._currentSleepResolver = null;
+    }
+  } catch (e) {
+    console.error("🔥 | Error while stopping playback:", e);
   }
+  console.log(`⏸️ | ${radioStation.name} - _stop invoked`);
+};
 
-  async function playSegments(radio) {
-    radio.trackObject.track.numCurrentSegment = 0;
-    let currentTrackPosition = 0;
+// Helper: cancellable sleep that can be aborted by calling radioStation._stop()
+function cancellableSleep(radio, ms) {
+  return new Promise((resolve) => {
+    // store resolver and timer on the radio object so _stop can cancel
+    radio._currentSleepResolver = resolve;
+    radio._currentSleepTimer = setTimeout(() => {
+      radio._currentSleepResolver = null;
+      radio._currentSleepTimer = null;
+      resolve();
+    }, ms);
+  });
+}
+
+async function playTrack(radio, trackTitle) {
+  console.log(`🎵 | ${radio.name} - Playing track: ${trackTitle}`);
+
+  try {
+    const trackData = await getTrackData(trackTitle);
     console.log(
-      `ℹ️ | ${radio.name} - playSegments starting with ${radio.trackObject.track.numSegments} segments`,
+      `ℹ️ | ${radio.name} - Retrieved track data for ${trackTitle}:`,
+      trackData,
+    );
+    if (!trackData)
+      console.warn(`⚠️ | ${radio.name} - No trackData found for ${trackTitle}`);
+
+    radio.trackObject.track.numSegments = trackData["Number of Segments"];
+    radio.trackObject.track.duration = trackData["Total Track Duration"];
+    radio.trackObject.track.title = trackData.Title;
+    radio.trackObject.track.author = trackData["Author Handle"];
+    radio.trackObject.track.SRC = trackData["Storage Reference URL"];
+    radio.trackObject.track.segmentDurations = trackData["Segment Durations"];
+    console.log(
+      `ℹ️ | ${radio.name} - Track source: ${radio.trackObject.track.SRC}, segments: ${radio.trackObject.track.segmentDurations.length}`,
     );
 
-    for (
-      let segNum = 1;
-      segNum <= radio.trackObject.track.numSegments;
-      segNum++
-    ) {
-      if (radio._stopCurrent) {
-        console.log(`⏹️ | ${radio.name} - Stopped during segment ${segNum}`);
-        break;
-      }
-
-      radio.trackObject.track.numCurrentSegment = segNum;
-      radio.trackObject.currentSegment.duration = Math.trunc(
-        radio.trackObject.track.segmentDurations[segNum - 1],
-      );
-
-      // Fix duration fallback
-      if (
-        !radio.trackObject.currentSegment.duration ||
-        isNaN(radio.trackObject.currentSegment.duration)
-      ) {
-        radio.trackObject.currentSegment.duration = 30; // default
-        console.log(`⚠️ | Fixed invalid duration for segment ${segNum}`);
-      }
-
+    await playSegments(radio); // Wait for all segments to play
+    // Check for pending tracklist after segments complete
+    if (radio.pendingTrackList && !radio._stopCurrent) {
       console.log(
-        `🎵 | ${radio.name} - Playing segment #${segNum}/${radio.trackObject.track.numSegments} (${radio.trackObject.currentSegment.duration}s)`,
+        `🔄 | ${radio.name} - Applying pending trackList after track end`,
       );
+      radio.trackList = radio.pendingTrackList;
+      radio.pendingTrackList = null;
+      radio.trackNum = -1;
+      radio._finishCurrentSegment = false;
+      radio._nextTrack();
+    }
+    if (!radio._stopCurrent) {
+      nextTrack(radio); // Go to the next track *after* playSegments completes if not stopped
+    }
+  } catch (error) {
+    console.error(`🔥 | ERROR - Getting track data: ${error.message}`);
+    if (!radio._stopCurrent) nextTrack(radio); // Even on error, proceed to the next track
+  }
+}
 
-      await playSegment(
-        radio,
-        radio.trackObject.currentSegment,
-        currentTrackPosition,
-      );
-      currentTrackPosition += radio.trackObject.currentSegment.duration;
+async function playSegments(radio) {
+  radio.trackObject.track.numCurrentSegment = 0;
+  let currentTrackPosition = 0;
+  console.log(
+    `ℹ️ | ${radio.name} - playSegments starting with ${radio.trackObject.track.numSegments} segments`,
+  );
+
+  for (
+    let segNum = 1;
+    segNum <= radio.trackObject.track.numSegments;
+    segNum++
+  ) {
+    if (radio._stopCurrent) {
+      console.log(`⏹️ | ${radio.name} - Stopped during segment ${segNum}`);
+      break;
     }
 
-    radio.isPlaying = false;
-    console.log(`✅ | ${radio.name} - All segments complete`);
+    radio.trackObject.track.numCurrentSegment = segNum;
+    radio.trackObject.currentSegment.duration = Math.trunc(
+      radio.trackObject.track.segmentDurations[segNum - 1],
+    );
+
+    // Fix duration fallback
+    if (
+      !radio.trackObject.currentSegment.duration ||
+      isNaN(radio.trackObject.currentSegment.duration)
+    ) {
+      radio.trackObject.currentSegment.duration = 30; // default
+      console.log(`⚠️ | Fixed invalid duration for segment ${segNum}`);
+    }
+
+    console.log(
+      `🎵 | ${radio.name} - Playing segment #${segNum}/${radio.trackObject.track.numSegments} (${radio.trackObject.currentSegment.duration}s)`,
+    );
+
+    await playSegment(
+      radio,
+      radio.trackObject.currentSegment,
+      currentTrackPosition,
+    );
+    currentTrackPosition += radio.trackObject.currentSegment.duration;
   }
+
+  radio.isPlaying = false;
+  console.log(`✅ | ${radio.name} - All segments complete`);
 }
 
 async function playSegment(radio, segment, trackPosition) {
@@ -602,8 +606,9 @@ async function playSegment(radio, segment, trackPosition) {
   }
 }
 
-// Start the first track
-nextTrack(radioStation);
+// Start the first track - playRadioStation must be called first for _nextTrack
+RadioManager.forEach((r) => playRadioStation(r));
+nextTrack(RadioManager[0]);
 
 fastify.get("/getAllTrackInformation", async function (request, reply) {
   try {
@@ -710,83 +715,116 @@ fastify.get("/getAllTracks", async function (request, reply) {
 // Protected under /admin so Basic Auth will be required by the existing hook
 // Expects JSON body: { stationName: string, trackList: string[] | string }
 fastify.post("/admin/editTrackList", async function (request, reply) {
-  const body = request.body || {};
-  const stationName = body.stationName;
-  console.log(
-    `📝 | /admin/editTrackList: Old trackList length for ${stationName}: ${RadioManager.find((r) => r.name === stationName)?.trackList?.length || 0}`,
-  );
-  const trackList = body.trackList;
-  console.log("DEBUG: Received editTrackList request:", body);
-  if (!stationName) {
-    return reply.code(400).send({ error: "stationName is required" });
-  }
-  if (!trackList) {
-    return reply.code(400).send({ error: "trackList is required" });
-  }
+  try {
+    const body = request.body || {};
+    console.log(
+      "🔍 Full /admin/editTrackList body:",
+      JSON.stringify(body, null, 2),
+    );
 
-  // Find the radio station in the in-memory RadioManager
-  const radio = RadioManager.find((r) => r.name === stationName);
-  if (!radio) {
-    return reply.code(404).send({ error: "radio station not found" });
-  }
+    const stationName = String(body.stationName || "").trim();
+    if (!stationName) {
+      return reply.code(400).send({ error: "stationName is required" });
+    }
 
-  // Normalize trackList input: accept array of strings or comma-separated string
-  let newList = [];
-  if (Array.isArray(trackList)) {
-    newList = trackList
-      .map((item) => String(item).trim())
-      .filter((s) => s.length > 0);
-  } else if (typeof trackList === "string") {
-    newList = trackList
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-  } else {
-    return reply.code(400).send({
-      error:
-        "trackList must be an array of strings or a comma-separated string",
+    console.log(
+      `📝 | /admin/editTrackList: Old trackList length for "${stationName}": ${RadioManager.find((r) => r.name === stationName)?.trackList?.length || 0}`,
+    );
+
+    const trackList = body.trackList;
+    if (trackList === null || trackList === undefined) {
+      return reply.code(400).send({ error: "trackList is required" });
+    }
+
+    // Find the radio station in the in-memory RadioManager
+    const radio = RadioManager.find((r) => r.name === stationName);
+    if (!radio) {
+      return reply
+        .code(404)
+        .send({
+          error: `radio station "${stationName}" not found. Available: ${RadioManager.map((r) => r.name).join(", ")}`,
+        });
+    }
+
+    // Ensure isPlaying is boolean
+    radio.isPlaying = !!radio.isPlaying;
+
+    // Normalize trackList input: accept array of strings or comma-separated string
+    let newList = [];
+    if (Array.isArray(trackList)) {
+      newList = trackList
+        .map((item) => String(item || "").trim())
+        .filter((s) => s.length > 0);
+    } else if (typeof trackList === "string") {
+      newList = trackList
+        .split(",")
+        .map((s) => (s || "").trim())
+        .filter((s) => s.length > 0);
+    } else {
+      console.warn(
+        `⚠️ Invalid trackList type: ${typeof trackList}, value:`,
+        trackList,
+      );
+      return reply.code(400).send({
+        error:
+          "trackList must be an array of strings or a comma-separated string",
+      });
+    }
+
+    console.log(
+      `✅ Normalized newList: [${newList.slice(0, 5).join(", ")}${newList.length > 5 ? " ..." : ""}] (length: ${newList.length})`,
+    );
+
+    // Compute added/removed songs
+    const oldList = [...(radio.trackList || [])];
+    const addedSongs = newList.filter((id) => !oldList.includes(id));
+    const deletedSongs = oldList.filter((id) => !newList.includes(id));
+    console.log(
+      `➕ Added songs (${addedSongs.length}): ${addedSongs.slice(0, 3).join(", ")} ${addedSongs.length > 3 ? "..." : ""}`,
+    );
+    console.log(
+      `➖ Deleted songs (${deletedSongs.length}): ${deletedSongs.slice(0, 3).join(", ")} ${deletedSongs.length > 3 ? "..." : ""}`,
+    );
+
+    // Update trackList
+    radio.trackList = newList;
+    console.log(
+      `🔄 | ${radio.name} - New queue set. Old length: ${oldList.length}, New length: ${newList.length}, isPlaying: ${radio.isPlaying}`,
+    );
+
+    if (radio.isPlaying) {
+      radio.pendingTrackList = [...newList]; // shallow copy
+      console.log(
+        `⏳ | ${radio.name} - Playing, set pendingTrackList (will apply after current track)`,
+      );
+    } else {
+      radio.pendingTrackList = null;
+      radio.trackNum = newList.length > 0 ? 0 : -1;
+      console.log(
+        `▶️ | ${radio.name} - Not playing, restart queue. trackNum: ${radio.trackNum}`,
+      );
+      if (radio._nextTrack && newList.length > 0) {
+        radio._nextTrack();
+      }
+    }
+
+    // Success response
+    return reply.send({
+      success: true,
+      station: radio.name,
+      oldLength: oldList.length,
+      newLength: newList.length,
+      isPlaying: radio.isPlaying,
+      trackList: radio.trackList.slice(), // copy for response
+      hasPending: !!radio.pendingTrackList,
+    });
+  } catch (err) {
+    console.error("💥 /admin/editTrackList ERROR:", err.message, err.stack);
+    return reply.code(500).send({
+      error: "Internal server error processing trackList update",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
     });
   }
-
-  // Compute added/removed songs
-  const oldList = [...radio.trackList]; // shallow copy
-  const addedSongs = newList.filter((id) => !oldList.includes(id));
-  const deletedSongs = oldList.filter((id) => !newList.includes(id));
-  console.log(
-    `➕ | Added songs (${addedSongs.length}): ${addedSongs.slice(0, 3).join(", ")} ${addedSongs.length > 3 ? "..." : ""}`,
-  );
-  console.log(
-    `➖ | Deleted songs (${deletedSongs.length}): ${deletedSongs.slice(0, 3).join(", ")} ${deletedSongs.length > 3 ? "..." : ""}`,
-  );
-
-  // Set pending instead of direct update
-  console.log(
-    `🔄 | ${radio.name} - New queue received. Old length: ${radio.trackList.length}, New length: ${newList.length}`,
-  );
-
-  // Always update current trackList immediately for API consistency
-  radio.trackList = newList;
-
-  if (radio.isPlaying) {
-    radio.pendingTrackList = newList;
-    console.log(
-      `⏳ | ${radio.name} - Currently playing, set pendingTrackList for restart after current track`,
-    );
-  } else {
-    radio.pendingTrackList = null;
-    radio.trackNum = -1;
-    console.log(
-      `▶️ | ${radio.name} - Not playing, restarting queue immediately`,
-    );
-    if (radio._nextTrack) radio._nextTrack();
-  }
-
-  // Respond with the updated station info
-  return reply.send({
-    success: true,
-    station: radio.name,
-    trackList: radio.trackList,
-  });
 });
 
 // Returns detailed track position + progress for *all* radio stations (includes % progress, current track)
