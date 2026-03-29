@@ -394,48 +394,42 @@ const radioStation = {
   name: "Wildflower Radio",
   trackList: ["5d7866c2-ad4d-4040-a6b4-b672f5b4faff"],
 };
-console.log(`ℹ️ | Configured single radio station: ${radioStation.name}`);
+console.log(`ℹ️ | Configured single radio station: ${singleRadio.name}`);
 
-var RadioManager = [
-  {
-    name: radioStation.name,
-    pendingTrackList: null,
-    trackList: radioStation.trackList,
-    trackNum: 0,
-    trackObject: {
-      // Track object specific to this radio station
-      currentSegment: { duration: undefined, position: undefined, SRC: "" },
-      track: {
-        segmentDurations: [],
-        numSegments: undefined,
-        numCurrentSegment: undefined,
-        author: "",
-        title: "",
-        duration: undefined,
-        position: undefined,
-        SRC: "",
-      },
+// Single radio station - replaced RadioManager array
+const singleRadio = {
+  name: "Wildflower Radio",
+  trackList: ["5d7866c2-ad4d-4040-a6b4-b672f5b4faff"],
+  trackNum: 0,
+  isPlaying: true,
+  isTransitioning: false,
+  _stopCurrent: false,
+  trackObject: {
+    currentSegment: { duration: 0, position: 0, SRC: "" },
+    track: {
+      segmentDurations: [],
+      numSegments: 0,
+      numCurrentSegment: 0,
+      author: "",
+      title: "",
+      duration: 0,
+      position: 0,
+      SRC: "",
     },
   },
-];
+};
 
 function start() {
-  console.log(
-    `🟢 | Starting radio manager for ${RadioManager.length} station(s)`,
-  );
-  RadioManager.forEach((radio) =>
-    console.log(
-      `→ Station: ${radio.name}, initial trackList length: ${radio.trackList.length}`,
-    ),
-  );
-  RadioManager.forEach((radio) => playRadioStation(radio)); // Initialize _nextTrack etc.
+  console.log(`🟢 | Starting single radio station: ${singleRadio.name}`);
+  console.log(`→ TrackList length: ${singleRadio.trackList.length}`);
+  playRadioStation(singleRadio); // Single call - fixed duplicate init
 }
 
 function playRadioStation(radioStation) {
   // Setup methods once (async nextTrack)
   radioStation._nextTrack = async () => await nextTrack(radioStation);
   radioStation._stop = () => {
-     radioStation._stopCurrent = true;
+    radioStation._stopCurrent = true;
     // If a cancellable sleep is active, cancel it to stop immediately
     try {
       if (radioStation._currentSleepTimer) {
@@ -591,7 +585,16 @@ async function playSegments(radio) {
 
   radio.isPlaying = false;
   console.log(`✅ | ${radio.name} - All segments complete`);
-}
+  
+  // FIXED: Atomic transition to next track - prevent race condition/stuck state
+  if (!radio.isTransitioning && !radio._stopCurrent) {
+    radio.isTransitioning = true;
+    console.log(`🔄 | ${radio.name} - Transitioning to next track...`);
+    setTimeout(() => {
+      nextTrack(radio);
+      radio.isTransitioning = false;
+    }, 100); // Small delay prevents overlap
+  }
 
 async function playSegment(radio, segment, trackPosition) {
   radio.trackObject.track.numCurrentSegment =
@@ -648,9 +651,9 @@ async function playSegment(radio, segment, trackPosition) {
   }
 }
 
-// Start the first track - playRadioStation must be called first for _nextTrack
-RadioManager.forEach((r) => playRadioStation(r));
-nextTrack(RadioManager[0]);
+// Start the first track - using singleRadio (fixed race conditions)
+playRadioStation(singleRadio);
+nextTrack(singleRadio);
 
 fastify.get("/getAllTrackInformation", async function (request, reply) {
   try {
@@ -869,28 +872,22 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
 
 // GET /stations/queue - Reports current trackList (active + pending) for debugging
 fastify.get("/stations/queue", function (request, reply) {
-  const queues = {};
-  RadioManager.forEach((radio) => {
-    queues[radio.name] = {
-      trackList: radio.trackList || [],
-      pendingTrackList: radio.pendingTrackList || null,
-      trackNum: radio.trackNum,
-      isPlaying: radio.isPlaying,
-      trackCount: radio.trackList?.length || 0,
-    };
-  });
-  console.log("📡 /stations/queue:", queues);
+  const queueInfo = {
+    trackList: singleRadio.trackList || [],
+    pendingTrackList: singleRadio.pendingTrackList || null,
+    trackNum: singleRadio.trackNum,
+    isPlaying: singleRadio.isPlaying,
+    trackCount: singleRadio.trackList?.length || 0,
+    isTransitioning: singleRadio.isTransitioning,
+  };
+  console.log("📡 /stations/queue:", queueInfo);
   reply.header("Content-Type", "application/json");
-  return queues;
+  return queueInfo;
 });
 
 // Returns detailed track position + progress for *all* radio stations (includes % progress, current track)
 fastify.get("/getAllTrackPositions", function (request, reply) {
-  const allTrackPositions = {};
-  RadioManager.forEach((radio) => {
-    allTrackPositions[radio.name] = radio.trackObject.track.position;
-  });
-  return allTrackPositions;
+  return { "Wildflower Radio": singleRadio.trackObject.track.position };
 });
 
 // Returns segment position for *all* radio stations
@@ -1107,23 +1104,22 @@ fastify.post("/addTrack", function (request, reply) {
           console.log(`   📊 | Segments: ${chunks.length}`);
           console.log(`   ⏱️  | Duration: ${request.body.duration}s`);
 
-          // AUTO-PLAY NEW TRACK if trackList empty
-          const radio = RadioManager[0];
-          let autoPlayed = false;
-          if (Array.isArray(radio.trackList) && radio.trackList.length === 0) {
-            console.log(
-              `🎵 | TrackList empty! Auto-adding & playing: ${trackID}`,
-            );
-            radio.trackList = [trackID];
-            radio.pendingTrackList = null;
-            radio.trackNum = -1;
-            nextTrack(radio);
-            autoPlayed = true;
-          } else {
-            console.log(
-              `ℹ️ | Track saved (trackList not empty). ID: ${trackID}`,
-            );
-          }
+  // AUTO-PLAY NEW TRACK if trackList empty
+  let autoPlayed = false;
+  if (Array.isArray(singleRadio.trackList) && singleRadio.trackList.length === 0) {
+    console.log(
+      `🎵 | TrackList empty! Auto-adding & playing: ${trackID}`,
+    );
+    singleRadio.trackList = [trackID];
+    singleRadio.trackNum = -1;
+    singleRadio.isTransitioning = false;
+    nextTrack(singleRadio);
+    autoPlayed = true;
+  } else {
+    console.log(
+      `ℹ️ | Track saved (trackList not empty). ID: ${trackID}`,
+    );
+  }
 
           // Add song to author's song list
           console.log(`\n📋 | ══════════════════════════════════════════`);
