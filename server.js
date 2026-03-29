@@ -394,7 +394,9 @@ function playRadioStation(radioStation) {
   radioStation._finishCurrentSegment = false;
   radioStation._gentleStop = () => {
     radioStation._finishCurrentSegment = true;
-    console.log(`⏸️ | ${radioStation.name} - gentleStop invoked (finish current segment)`);
+    console.log(
+      `⏸️ | ${radioStation.name} - gentleStop invoked (finish current segment)`,
+    );
   };
 
   radioStation._stop = () => {
@@ -459,7 +461,9 @@ function playRadioStation(radioStation) {
       await playSegments(radio); // Wait for all segments to play
       // Check for pending tracklist after segments complete
       if (radio.pendingTrackList && !radio._stopCurrent) {
-        console.log(`🔄 | ${radio.name} - Applying pending trackList after track end`);
+        console.log(
+          `🔄 | ${radio.name} - Applying pending trackList after track end`,
+        );
         radio.trackList = radio.pendingTrackList;
         radio.pendingTrackList = null;
         radio.trackNum = -1;
@@ -551,15 +555,17 @@ function playRadioStation(radioStation) {
     radio.trackObject.currentSegment.position = 0; // Reset segment position HERE
 
     // Simulate playback and position tracking (REPLACE THIS WITH ACTUAL AUDIO PLAYBACK LOGIC)
-      for (let position = 0; position < segment.duration; position++) {
-        if (radio._stopCurrent) {
-          console.log(`⏹️ | ${radio.name} - Stopping segment playback.`);
-          break;
-        }
-        if (radio._finishCurrentSegment && position >= segment.duration - 2) {
-          console.log(`🎯 | ${radio.name} - Finishing current segment due to gentleStop`);
-        }
-        await cancellableSleep(radio, 1000);
+    for (let position = 0; position < segment.duration; position++) {
+      if (radio._stopCurrent) {
+        console.log(`⏹️ | ${radio.name} - Stopping segment playback.`);
+        break;
+      }
+      if (radio._finishCurrentSegment && position >= segment.duration - 2) {
+        console.log(
+          `🎯 | ${radio.name} - Finishing current segment due to gentleStop`,
+        );
+      }
+      await cancellableSleep(radio, 1000);
       if (radio._stopCurrent) {
         console.log(`⏹️ | ${radio.name} - Stopping segment playback.`);
         break;
@@ -577,68 +583,67 @@ function playRadioStation(radioStation) {
   nextTrack(radioStation);
 }
 
-// ... (Admin routes remain the same)
-
-// Returns track information for *all* radio stations
 fastify.get("/getAllTrackInformation", async function (request, reply) {
-  const allTrackInfo = {};
-      // Gather info for each radio and include the next track's storage URL
-      await Promise.all(
-        RadioManager.map(async (radio) => {
-          // shallow clone trackObject to avoid mutating runtime state
-          const info = Object.assign({}, radio.trackObject);
-          
-          // Use pendingTrackList if available for "next track preview"
-          const effectiveTrackList = radio.pendingTrackList || radio.trackList;
-          let nextTrackStorageURL = null;
-          
-          try {
-            if (Array.isArray(effectiveTrackList) && effectiveTrackList.length > 0) {
-              const nextIndex =
-                typeof radio.trackNum === "number"
-                  ? (radio.trackNum + 1) % effectiveTrackList.length
-                  : 0;
-              const nextId = effectiveTrackList[nextIndex];
-              if (nextId) {
-                const doc = await db.collection("Tracks").doc(String(nextId)).get();
-                const data = doc.exists ? doc.data() : null;
-                if (data) {
-                  nextTrackStorageURL =
-                    data["Storage Reference URL"] ||
-                    data.storageReferenceURL ||
-                    null;
-                }
-              }
-              console.log(`ℹ️ | ${radio.name} - nextTrack preview from ${radio.pendingTrackList ? 'pending' : 'active'} list: ${nextTrackStorageURL ? nextId.substring(0,8)+'...' : 'none'}`);
-            }
-          } catch (err) {
-            console.error("🔥 | ERROR - fetching next track storage URL:", err);
-          }
+  try {
+    const allTrackInfo = {};
+    // Gather info for each radio station (only 1 currently) and next track preview
+    await Promise.all(
+      RadioManager.map(async (radio) => {
+        console.log(`ℹ️ | Gathering track info for ${radio.name}`);
+        // Shallow clone to avoid mutating runtime state
+        const info = JSON.parse(JSON.stringify(radio.trackObject));
 
-          info.nextTrackStorageURL = nextTrackStorageURL;
-          allTrackInfo[radio.name] = info;
-        }),
-      );
-          const nextIndex =
-            typeof radio.trackNum === "number"
-              ? (radio.trackNum + 1) % radio.trackList.length
-              : 0;
-          const nextId = radio.trackList[nextIndex];
-          if (nextId) {
-            const doc = await db.collection("Tracks").doc(String(nextId)).get();
-            const data = doc.exists ? doc.data() : null;
-            if (data) {
+        // Use pendingTrackList if available, else current trackList
+        const effectiveTrackList = radio.pendingTrackList || radio.trackList;
+        let nextTrackStorageURL = null;
+
+        try {
+          if (
+            Array.isArray(effectiveTrackList) &&
+            effectiveTrackList.length > 0
+          ) {
+            const nextIndex =
+              typeof radio.trackNum === "number"
+                ? (radio.trackNum + 1) % effectiveTrackList.length
+                : 0;
+            const nextId = effectiveTrackList[nextIndex];
+            if (nextId) {
+              const doc = await db
+                .collection("Tracks")
+                .doc(String(nextId))
+                .get();
+              const data = doc.exists ? doc.data() : null;
               nextTrackStorageURL =
-                data["Storage Reference URL"] ||
-                data.storageReferenceURL ||
+                data?.["Storage Reference URL"] ||
+                data?.storageReferenceURL ||
                 null;
+              console.log(
+                `ℹ️ | ${radio.name} - Next track preview: ${nextTrackStorageURL ? nextId.substring(0, 8) + "..." : "none"} (${radio.pendingTrackList ? "pending" : "active"} list)`,
+              );
             }
           }
-        
+        } catch (err) {
+          console.error(
+            `🔥 | ${radio.name} - Error fetching next track URL:`,
+            err.message,
+          );
+        }
 
+        info.nextTrackStorageURL = nextTrackStorageURL;
+        allTrackInfo[radio.name] = info;
+      }),
+    );
+    console.log(
+      `ℹ️ | /getAllTrackInformation returning data for ${Object.keys(allTrackInfo).length} station(s):`,
+      Object.keys(allTrackInfo),
+    );
 
-  reply.header("Content-Type", "application/json");
-  return allTrackInfo;
+    reply.header("Content-Type", "application/json");
+    return allTrackInfo;
+  } catch (err) {
+    console.error("🔥 | /getAllTrackInformation error:", err.message);
+    reply.code(500).send({ error: "Failed to get track information" });
+  }
 });
 
 // Returns the current radio station
@@ -686,7 +691,7 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
   const body = request.body || {};
   const stationName = body.stationName;
   console.log(
-    `📝 | /admin/editTrackList: Old trackList length for ${stationName}: ${RadioManager.find(r => r.name === stationName)?.trackList?.length || 0}`,
+    `📝 | /admin/editTrackList: Old trackList length for ${stationName}: ${RadioManager.find((r) => r.name === stationName)?.trackList?.length || 0}`,
   );
   const trackList = body.trackList;
   console.log("DEBUG: Received editTrackList request:", body);
@@ -723,10 +728,14 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
 
   // Compute added/removed songs
   const oldList = [...radio.trackList]; // shallow copy
-  const addedSongs = newList.filter(id => !oldList.includes(id));
-  const deletedSongs = oldList.filter(id => !newList.includes(id));
-  console.log(`➕ | Added songs (${addedSongs.length}): ${addedSongs.slice(0,3).join(', ')} ${addedSongs.length > 3 ? '...' : ''}`);
-  console.log(`➖ | Deleted songs (${deletedSongs.length}): ${deletedSongs.slice(0,3).join(', ')} ${deletedSongs.length > 3 ? '...' : ''}`);
+  const addedSongs = newList.filter((id) => !oldList.includes(id));
+  const deletedSongs = oldList.filter((id) => !newList.includes(id));
+  console.log(
+    `➕ | Added songs (${addedSongs.length}): ${addedSongs.slice(0, 3).join(", ")} ${addedSongs.length > 3 ? "..." : ""}`,
+  );
+  console.log(
+    `➖ | Deleted songs (${deletedSongs.length}): ${deletedSongs.slice(0, 3).join(", ")} ${deletedSongs.length > 3 ? "..." : ""}`,
+  );
 
   // Set pending instead of direct update
   radio.pendingTrackList = newList;
@@ -806,7 +815,8 @@ fastify.post("/addTrack", function (request, reply) {
   ) {
     console.log("🔘 | Trying to upload Track Ref to Database");
     try {
-      const authorId = await ensureArtistExists(request.body.author);
+      const authorResult = await getOrCreateAuthor(request.body.author);
+      const authorId = authorResult ? authorResult.id : null;
       return setDatabaseFile("Tracks", trackID, {
         "Storage Reference URL": `Tracks/${trackID}`,
         Title: request.body.title,
