@@ -432,12 +432,26 @@ function start() {
 }
 
 function playRadioStation(radioStation) {
-  // Setup methods once
-  radioStation._nextTrack = () => nextTrack(radioStation);
+  // Setup methods once (async nextTrack)
+  radioStation._nextTrack = async () => await nextTrack(radioStation);
   radioStation._stop = () => {
-    radioStation._stopCurrent = true; /* cleanup timers */
+     radioStation._stopCurrent = true;
+    // If a cancellable sleep is active, cancel it to stop immediately
+    try {
+      if (radioStation._currentSleepTimer) {
+        clearTimeout(radioStation._currentSleepTimer);
+        radioStation._currentSleepTimer = null;
+      }
+      if (typeof radioStation._currentSleepResolver === "function") {
+        // Resolve the pending sleep so any awaiting logic continues immediately
+        radioStation._currentSleepResolver();
+        radioStation._currentSleepResolver = null;
+      }
+    } catch (e) {
+      console.error("🔥 | Error while stopping playback:", e);
+    }
+    console.log(`⏸️ | ${radioStation.name} - _stop invoked`);
   };
-  // ... rest unchanged
 }
 console.log(`▶️ | playRadioStation() called for ${radioStation.name}`);
 // Use the radio object's trackNum as the authoritative current track index
@@ -559,7 +573,7 @@ async function playSegments(radio) {
       !radio.trackObject.currentSegment.duration ||
       isNaN(radio.trackObject.currentSegment.duration)
     ) {
-      radio.trackObject.currentSegment.duration = 30; // default
+      radio.trackObject.currentSegment.duration = 28; // default
       console.log(`⚠️ | Fixed invalid duration for segment ${segNum}`);
     }
 
@@ -830,7 +844,7 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
         `▶️ | ${radio.name} - Not playing, restart queue. trackNum: ${radio.trackNum}`,
       );
       if (radio._nextTrack && newList.length > 0) {
-        radio._nextTrack();
+        await radio._nextTrack();
       }
     }
 
@@ -851,6 +865,23 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
       details: process.env.NODE_ENV === "development" ? err.message : undefined,
     });
   }
+});
+
+// GET /stations/queue - Reports current trackList (active + pending) for debugging
+fastify.get("/stations/queue", function (request, reply) {
+  const queues = {};
+  RadioManager.forEach((radio) => {
+    queues[radio.name] = {
+      trackList: radio.trackList || [],
+      pendingTrackList: radio.pendingTrackList || null,
+      trackNum: radio.trackNum,
+      isPlaying: radio.isPlaying,
+      trackCount: radio.trackList?.length || 0,
+    };
+  });
+  console.log("📡 /stations/queue:", queues);
+  reply.header("Content-Type", "application/json");
+  return queues;
 });
 
 // Returns detailed track position + progress for *all* radio stations (includes % progress, current track)
