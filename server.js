@@ -411,6 +411,7 @@ var RadioManager = [
   {
     name: radioStation.name,
     trackNum: 0,
+    currentTrackId: null,
     trackObject: {
       // Track object specific to this radio station
       currentSegment: { duration: undefined, position: undefined, SRC: "" },
@@ -460,6 +461,20 @@ function playRadioStation(radioStation) {
       `⏭️ | ${radio.name} - Playing next track #${radio.trackNum + 1}: ${trackEntry["Track Name"]} (ID: ${trackId.substring(0, 8)}...)`,
     );
 
+    const oldTrackId = radio.currentTrackId;
+    radio.currentTrackId = trackId;
+
+    if (oldTrackId && oldTrackId === trackId) {
+      console.log(
+        `⏯️ | ${radio.name} - Continuing same track ${trackId.substring(0, 8)}... (trackNum advanced)`,
+      );
+      return; // No interrupt needed
+    }
+
+    console.log(
+      `⏹️→▶️ | ${radio.name} - Interrupt: switching to ${trackEntry["Track Name"]} (ID: ${trackId.substring(0, 8)}...)`,
+    );
+
     radio.trackObject = {
       currentSegment: { duration: 0, position: 0, SRC: "" },
       track: {
@@ -482,11 +497,13 @@ function playRadioStation(radioStation) {
       const trackData = trackDoc.exists ? trackDoc.data() : null;
       if (!trackData) {
         console.warn(`⚠️ | No track data for ID: ${trackId}`);
+        radio.currentTrackId = null;
         return nextTrack(radio); // Skip invalid
       }
       playTrack(radio, trackData);
     } catch (err) {
       console.error(`🔥 | Error loading track ${trackId}:`, err);
+      radio.currentTrackId = null;
       nextTrack(radio);
     }
   }
@@ -812,10 +829,19 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
   await writeTracklistToStorage(newTracklist);
   console.log(`✅ Reordered tracklist to ${newTracklist.length} tracks`);
 
-  // Reset playback to start from new list
-  radio.trackNum = -1;
-  if (radio._stop) radio._stop();
-  if (radio._nextTrack) radio._nextTrack();
+  // Smart interrupt: check if first track changed
+  const freshList = await readTracklistFromStorage();
+  const firstId = freshList[0]?.["Track ID"];
+  if (firstId && firstId !== radio.currentTrackId) {
+    console.log(
+      `⏹️→▶️ | Admin edit: first track changed ${radio.currentTrackId?.substring(0, 8)}... → ${firstId.substring(0, 8)}... → triggering nextTrack`,
+    );
+    if (radio._nextTrack) radio._nextTrack();
+  } else {
+    console.log(
+      `⏯️ | Admin edit: first track same (${firstId?.substring(0, 8)}...), no interrupt`,
+    );
+  }
 
   return reply.send({
     success: true,
@@ -859,9 +885,15 @@ fastify.post("/admin/reorderTracklist", async function (request, reply) {
   const newTracklist = await reorderTracklist(newOrder);
   console.log(`🔄 Reordered to ${newTracklist.length} tracks`);
 
-  radio.trackNum = -1;
-  if (radio._stop) radio._stop();
-  if (radio._nextTrack) radio._nextTrack();
+  // Smart interrupt
+  const freshList = await readTracklistFromStorage();
+  const firstId = freshList[0]?.["Track ID"];
+  if (firstId && firstId !== radio.currentTrackId) {
+    console.log(`⏹️→▶️ | Reorder: first changed → nextTrack`);
+    if (radio._nextTrack) radio._nextTrack();
+  } else {
+    console.log(`⏯️ | Reorder: first same, no interrupt`);
+  }
 
   return reply.send({
     success: true,
@@ -904,9 +936,15 @@ fastify.post("/admin/deleteTrack", async function (request, reply) {
 
   console.log(`🗑️ Full delete of track ${trackId}`);
 
-  radio.trackNum = -1;
-  if (radio._stop) radio._stop();
-  if (radio._nextTrack) radio._nextTrack();
+  // Smart interrupt after delete
+  const freshList = await readTracklistFromStorage();
+  const firstId = freshList[0]?.["Track ID"];
+  if (firstId && firstId !== radio.currentTrackId) {
+    console.log(`⏹️→▶️ | Delete: first changed → nextTrack`);
+    if (radio._nextTrack) radio._nextTrack();
+  } else {
+    console.log(`⏯️ | Delete: first same, no interrupt`);
+  }
 
   return reply.send({ success: true, deleted: trackId });
 });
@@ -927,9 +965,15 @@ fastify.post("/admin/rejectTrack", async function (request, reply) {
     `🚫 Rejected track ${trackId}, new length: ${newTracklist.length}`,
   );
 
-  radio.trackNum = -1;
-  if (radio._stop) radio._stop();
-  if (radio._nextTrack) radio._nextTrack();
+  // Smart interrupt after reject
+  const freshList = await readTracklistFromStorage();
+  const firstId = freshList[0]?.["Track ID"];
+  if (firstId && firstId !== radio.currentTrackId) {
+    console.log(`⏹️→▶️ | Reject: first changed → nextTrack`);
+    if (radio._nextTrack) radio._nextTrack();
+  } else {
+    console.log(`⏯️ | Reject: first same, no interrupt`);
+  }
 
   return reply.send({
     success: true,
