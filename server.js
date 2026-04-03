@@ -501,6 +501,30 @@ function playRadioStation(radioStation) {
         return nextTrack(radio); // Skip invalid
       }
       playTrack(radio, trackData);
+
+      // Queue rotation: move played track to end of tracklist (User Task 2)
+      try {
+        const freshTracklist = await readTracklistFromStorage();
+        if (freshTracklist.length > 0) {
+          const playedId = trackId;
+          const withoutPlayed = freshTracklist.filter(
+            (entry) => entry["Track ID"] !== playedId,
+          );
+          const newOrderIds = [
+            ...withoutPlayed.map((e) => e["Track ID"]),
+            playedId,
+          ];
+          await reorderTracklist(newOrderIds);
+          console.log(
+            `🔄 | ${radio.name} - Moved played track ${playedId.substring(0, 8)}... to end (${newOrderIds.length} tracks)`,
+          );
+        }
+      } catch (rotateErr) {
+        console.error(
+          `🔥 | Queue rotation failed for ${trackId.substring(0, 8)}...:`,
+          rotateErr.message,
+        );
+      }
     } catch (err) {
       console.error(`🔥 | Error loading track ${trackId}:`, err);
       radio.currentTrackId = null;
