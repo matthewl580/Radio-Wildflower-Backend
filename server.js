@@ -53,8 +53,8 @@ const serviceAccount = {
   project_id: process.env.PROJECT_ID,
   private_key_id: process.env.SERVICE_ACCOUNT_PRIVATE_KEY_ID,
   private_key: process.env.SERVICE_ACCOUNT_PRIVATE_KEY.replace(
-    /\\NEWLINE/g,
-    "\n",
+    /\EWLINE/g,
+    "",
   ),
   client_email: process.env.CLIENT_EMAIL,
   client_id: process.env.SERVICE_ACCOUNT_CLIENT_ID,
@@ -172,7 +172,7 @@ function getDatabaseFile(collection, fileName, func = () => {}) {
 }
 
 function setDatabaseFile(collection, fileName, data) {
-  console.log(`🗒️ | Setting /{collection}/{fileName} to: \n ${data}`);
+  console.log(`🗒️ | Setting /{collection}/{fileName} to:  ${data}`);
   // Return the Promise so callers can await this operation
   return db.collection(collection).doc(fileName).set(data);
 }
@@ -239,7 +239,7 @@ async function getOrCreateAuthor(authorName) {
 async function addSongToAuthor(authorId, songId, songTitle) {
   if (!authorId || !songId || !songTitle) {
     console.warn(
-      `⚠️ | addSongToAuthor: Missing required parameters\n` +
+      `⚠️ | addSongToAuthor: Missing required parameters` +
         `   authorId: ${authorId ? "✓" : "✗"}, songId: ${songId ? "✓" : "✗"}, songTitle: ${songTitle ? "✓" : "✗"}`,
     );
     return false;
@@ -662,7 +662,6 @@ function playRadioStation(radioStation) {
   }
 
   async function playSegment(radio, segment, trackPosition) {
-    // ... (same as before, but with the crucial position updates and logging)
     console.log(
       `🎵 | ${radio.name} - Playing segment #${radio.trackObject.track.numCurrentSegment}`,
     );
@@ -788,7 +787,7 @@ fastify.get("/getAllTracks", async function (request, reply) {
     snapshot.forEach((doc) => {
       const data = doc.data() || {};
       tracks.push({
-        title: doc.id,
+        id: doc.id,        title: data.Title || doc.id,
         author: data["Author Handle"] || null,
         authorId: data["Author ID"] || data.authorId || null,
         duration: data["Total Track Duration"] || null,
@@ -1175,7 +1174,7 @@ fastify.post("/addTrack", function (request, reply) {
           }
 
           // All chunks processed, manage author and write final DB entry
-          console.log(`\n🎨 | ══════════════════════════════════════════`);
+          console.log(`🎨 | ══════════════════════════════════════════`);
           console.log(`🎨 | Setting up author in Firestore`);
           console.log(`🎨 | ══════════════════════════════════════════`);
 
@@ -1190,7 +1189,7 @@ fastify.post("/addTrack", function (request, reply) {
           const authorId = authorResult.id;
           console.log(`✅ | Author ready: ID=${authorId.substring(0, 8)}...`);
 
-          console.log(`\n📁 | ══════════════════════════════════════════`);
+          console.log(`📁 | ══════════════════════════════════════════`);
           console.log(`📁 | Writing Track metadata to Firestore`);
           console.log(`📁 | ══════════════════════════════════════════`);
 
@@ -1212,7 +1211,7 @@ fastify.post("/addTrack", function (request, reply) {
           console.log(`   ⏱️  | Duration: ${request.body.duration}s`);
 
           // Add song to author's song list
-          console.log(`\n📋 | ══════════════════════════════════════════`);
+          console.log(`📋 | ══════════════════════════════════════════`);
           console.log(`📋 | Adding song to author's collection`);
           console.log(`📋 | ══════════════════════════════════════════`);
 
@@ -1230,7 +1229,7 @@ fastify.post("/addTrack", function (request, reply) {
           }
 
           // Add to TRACKLIST
-          console.log(`\n📋 | Adding track to TRACKLIST`);
+          console.log(`📋 | Adding track to TRACKLIST`);
           const authorFull = await getAuthorById(authorId);
           if (authorFull) {
             const newEntry = {
@@ -1261,7 +1260,7 @@ fastify.post("/addTrack", function (request, reply) {
           }
 
           console.log(
-            `\n✅✅✅ | /addTrack COMPLETE!\n   trackID: ${trackID}\n   total_chunks: ${chunks.length}\n   total_duration: ${request.body.duration}s\n   author: ${request.body.author}\n   title: ${request.body.title}\n✅✅✅\n`,
+            `✅✅✅ | /addTrack COMPLETE!   trackID: ${trackID}   total_chunks: ${chunks.length}   total_duration: ${request.body.duration}s   author: ${request.body.author}   title: ${request.body.title}✅✅✅`,
           );
 
           // Send success response
