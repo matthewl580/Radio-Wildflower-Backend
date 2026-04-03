@@ -53,8 +53,8 @@ const serviceAccount = {
   project_id: process.env.PROJECT_ID,
   private_key_id: process.env.SERVICE_ACCOUNT_PRIVATE_KEY_ID,
   private_key: process.env.SERVICE_ACCOUNT_PRIVATE_KEY.replace(
-    /\EWLINE/g,
-    "",
+    /\\NEWLINE/g,
+    "\n",
   ),
   client_email: process.env.CLIENT_EMAIL,
   client_id: process.env.SERVICE_ACCOUNT_CLIENT_ID,
