@@ -300,14 +300,45 @@ async function getAuthorById(authorId) {
   }
 }
 
+async function loadTracklistFromFirestore() {
+  try {
+    const doc = await db.collection("Tracks").doc("TRACKLIST").get();
+    if (doc.exists) {
+      const data = doc.data();
+      if (Array.isArray(data.tracklist)) {
+        const trackIds = data.tracklist
+          .map((item) => item["Track ID"])
+          .filter(Boolean);
+        radioStation.trackList = trackIds;
+        console.log(`✅ Loaded ${trackIds.length} tracks from TRACKLIST`);
+        return trackIds;
+      } else {
+        console.warn("⚠️ TRACKLIST data invalid, using empty");
+      }
+    } else {
+      console.log("📝 Creating empty TRACKLIST doc");
+      await db.collection("Tracks").doc("TRACKLIST").set({ tracklist: [] });
+      console.log("✅ TRACKLIST doc created");
+    }
+    radioStation.trackList = [];
+    return [];
+  } catch (err) {
+    console.error("🔥 loadTracklistFromFirestore:", err.message);
+    radioStation.trackList = [];
+    return [];
+  }
+}
+
 //============================================================= START OF ACTUAL CODE
 
 // Single radio station configuration
 const radioStation = {
   name: "Wildflower Radio",
-  trackList: ["5d7866c2-ad4d-4040-a6b4-b672f5b4faff"],
+  trackList: [],
 };
-console.log(`ℹ️ | Configured single radio station: ${radioStation.name}`);
+console.log(
+  `ℹ️ | Configured single radio station: ${radioStation.name} (trackList from Firestore)`,
+);
 
 var RadioManager = [
   {
@@ -332,13 +363,14 @@ var RadioManager = [
   },
 ];
 
-function start() {
+async function start() {
   console.log(
     `🟢 | Starting radio manager for ${RadioManager.length} station(s)`,
   );
+  await loadTracklistFromFirestore();
   RadioManager.forEach((radio) =>
     console.log(
-      `→ Station: ${radio.name}, initial trackList length: ${radio.trackList.length}`,
+      `→ Station: ${radio.name}, trackList length: ${radioStation.trackList.length}`,
     ),
   );
   RadioManager.forEach((radio) => playRadioStation(radio)); // Play all stations simultaneously
@@ -1015,6 +1047,33 @@ fastify.post("/addTrack", function (request, reply) {
             console.warn(
               `⚠️ | Could not add song to author's collection (but track was saved to Firestore)`,
             );
+          }
+
+          // Add to TRACKLIST
+          console.log(`\n📋 | Adding track to TRACKLIST`);
+          const authorFull = await getAuthorById(authorId);
+          if (authorFull) {
+            const newEntry = {
+              "Track Name": request.body.title,
+              Author: authorFull.data,
+              "Track ID": trackID,
+              "track length": request.body.duration,
+            };
+            const tracklistDocRef = db.collection("Tracks").doc("TRACKLIST");
+            await tracklistDocRef
+              .update({
+                tracklist: FieldValue.arrayUnion(newEntry),
+              })
+              .catch(async (err) => {
+                if (err.code === "not-found") {
+                  await tracklistDocRef.set({ tracklist: [newEntry] });
+                } else {
+                  console.error("🔥 TRACKLIST update error:", err);
+                }
+              });
+            console.log(`✅ Added to TRACKLIST: ${trackID}`);
+          } else {
+            console.warn("⚠️ Could not fetch full author for TRACKLIST");
           }
 
           // Attempt to clean up source file from storage
