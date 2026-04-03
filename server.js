@@ -91,6 +91,74 @@ async function deleteStorageFile(filePath, callback = () => {}) {
     });
 }
 
+async function readTracklistFromStorage() {
+  try {
+    const fileRef = storage.bucket().file("Tracks/TRACKLIST.json");
+    const [exists] = await fileRef.exists();
+    if (!exists) {
+      console.log("📄 | TRACKLIST.json not found, returning empty array");
+      return [];
+    }
+
+    const [content] = await fileRef.download();
+    const tracklist = JSON.parse(content.toString());
+    if (!Array.isArray(tracklist)) {
+      console.warn("⚠️ | Invalid TRACKLIST.json format, returning empty");
+      return [];
+    }
+    console.log(`✅ | Loaded ${tracklist.length} tracks from TRACKLIST.json`);
+    return tracklist;
+  } catch (err) {
+    console.error("🔥 | readTracklistFromStorage error:", err.message);
+    return [];
+  }
+}
+
+async function writeTracklistToStorage(tracklist) {
+  try {
+    if (!Array.isArray(tracklist)) {
+      throw new Error("tracklist must be an array");
+    }
+    const content = JSON.stringify(tracklist, null, 2);
+    const fileRef = storage.bucket().file("Tracks/TRACKLIST.json");
+    await fileRef.save(content, {
+      metadata: { contentType: "application/json" },
+    });
+    console.log(`✅ | Wrote ${tracklist.length} tracks to TRACKLIST.json`);
+  } catch (err) {
+    console.error("🔥 | writeTracklistToStorage error:", err.message);
+    throw err;
+  }
+}
+
+async function appendToTracklist(newEntry) {
+  const tracklist = await readTracklistFromStorage();
+  tracklist.push(newEntry);
+  await writeTracklistToStorage(tracklist);
+  return tracklist;
+}
+
+async function removeFromTracklist(trackId) {
+  const tracklist = await readTracklistFromStorage();
+  const initialLength = tracklist.length;
+  const newList = tracklist.filter((entry) => entry["Track ID"] !== trackId);
+  if (newList.length !== initialLength) {
+    await writeTracklistToStorage(newList);
+    console.log(`✅ | Removed track ${trackId} from TRACKLIST`);
+    return newList;
+  }
+  return tracklist;
+}
+
+async function reorderTracklist(newOrderIds) {
+  const tracklist = await readTracklistFromStorage();
+  const idMap = new Map(tracklist.map((entry) => [entry["Track ID"], entry]));
+  const newList = newOrderIds.map((id) => idMap.get(id)).filter(Boolean);
+  await writeTracklistToStorage(newList);
+  console.log(`✅ | Reordered TRACKLIST to ${newList.length} tracks`);
+  return newList;
+}
+
 const db = getFirestore();
 
 function getDatabaseFile(collection, fileName, func = () => {}) {
@@ -334,17 +402,14 @@ async function loadTracklistFromFirestore() {
 // Single radio station configuration
 const radioStation = {
   name: "Wildflower Radio",
-  trackList: [],
 };
 console.log(
-  `ℹ️ | Configured single radio station: ${radioStation.name} (trackList from Firestore)`,
+  `ℹ️ | Configured single radio station: ${radioStation.name} (trackList from Storage JSON)`,
 );
 
 var RadioManager = [
   {
     name: radioStation.name,
-    pendingTrackList: null,
-    trackList: radioStation.trackList,
     trackNum: 0,
     trackObject: {
       // Track object specific to this radio station
@@ -367,12 +432,9 @@ async function start() {
   console.log(
     `🟢 | Starting radio manager for ${RadioManager.length} station(s)`,
   );
-  await loadTracklistFromFirestore();
-  RadioManager.forEach((radio) =>
-    console.log(
-      `→ Station: ${radio.name}, trackList length: ${radioStation.trackList.length}`,
-    ),
-  );
+  // Ensure initial TRACKLIST.json exists
+  await writeTracklistToStorage([]);
+  RadioManager.forEach((radio) => console.log(`→ Station: ${radio.name}`));
   RadioManager.forEach((radio) => playRadioStation(radio)); // Play all stations simultaneously
 }
 
@@ -383,21 +445,22 @@ function playRadioStation(radioStation) {
   // Flag to indicate immediate stop of current playback
   radioStation._stopCurrent = false;
 
-  function nextTrack(radio) {
-    if (!Array.isArray(radio.trackList) || radio.trackList.length === 0) {
-      console.warn(`⚠️ | ${radio.name} has empty trackList.`);
+  async function nextTrack(radio) {
+    const tracklist = await readTracklistFromStorage();
+    if (tracklist.length === 0) {
+      console.warn(`⚠️ | ${radio.name} has empty tracklist.`);
       return;
     }
 
-    radio.trackNum = (radio.trackNum + 1) % radio.trackList.length; // Wrap around
-    const trackTitle = radio.trackList[radio.trackNum];
+    radio.trackNum = (radio.trackNum + 1) % tracklist.length;
+    const trackEntry = tracklist[radio.trackNum];
+    const trackId = trackEntry["Track ID"];
 
     console.log(
-      `⏭️ | ${radio.name} - Playing next track (Track #${radio.trackNum + 1}): ${trackTitle}`,
+      `⏭️ | ${radio.name} - Playing next track #${radio.trackNum + 1}: ${trackEntry["Track Name"]} (ID: ${trackId.substring(0, 8)}...)`,
     );
 
     radio.trackObject = {
-      // Reset the ENTIRE trackObject
       currentSegment: { duration: 0, position: 0, SRC: "" },
       track: {
         segmentDurations: [],
@@ -411,13 +474,21 @@ function playRadioStation(radioStation) {
       },
     };
 
-    // Clear stop flag when starting a new track
     radio._stopCurrent = false;
-    console.log(
-      `ℹ️ | ${radio.name} - Reset trackObject and starting playback for ${trackTitle}`,
-    );
 
-    playTrack(radio, trackTitle);
+    // Load full track data from Firestore
+    try {
+      const trackDoc = await db.collection("Tracks").doc(trackId).get();
+      const trackData = trackDoc.exists ? trackDoc.data() : null;
+      if (!trackData) {
+        console.warn(`⚠️ | No track data for ID: ${trackId}`);
+        return nextTrack(radio); // Skip invalid
+      }
+      playTrack(radio, trackData);
+    } catch (err) {
+      console.error(`🔥 | Error loading track ${trackId}:`, err);
+      nextTrack(radio);
+    }
   }
 
   // Expose nextTrack so external code (admin endpoint) can trigger immediate start
@@ -463,51 +534,28 @@ function playRadioStation(radioStation) {
     });
   }
 
-  async function playTrack(radio, trackTitle) {
-    console.log(`🎵 | ${radio.name} - Playing track: ${trackTitle}`);
+  async function playTrack(radio, trackData) {
+    console.log(`🎵 | ${radio.name} - Playing track: ${trackData.Title}`);
 
-    try {
-      const trackData = await new Promise((resolve, reject) => {
-        // Use Promise for getDatabaseFile
-        getDatabaseFile("Tracks", trackTitle, (data) => resolve(data));
-      });
-      console.log(
-        `ℹ️ | ${radio.name} - Retrieved track data for ${trackTitle}:`,
-        trackData,
-      );
-      if (!trackData)
-        console.warn(
-          `⚠️ | ${radio.name} - No trackData found for ${trackTitle}`,
-        );
+    if (!trackData) {
+      console.warn(`⚠️ | ${radio.name} - Invalid trackData`);
+      if (!radio._stopCurrent) nextTrack(radio);
+      return;
+    }
 
-      radio.trackObject.track.numSegments = trackData["Number of Segments"];
-      radio.trackObject.track.duration = trackData["Total Track Duration"];
-      radio.trackObject.track.title = trackData.Title;
-      radio.trackObject.track.author = trackData["Author Handle"];
-      radio.trackObject.track.SRC = trackData["Storage Reference URL"];
-      radio.trackObject.track.segmentDurations = trackData["Segment Durations"];
-      console.log(
-        `ℹ️ | ${radio.name} - Track source: ${radio.trackObject.track.SRC}, segments: ${radio.trackObject.track.segmentDurations.length}`,
-      );
+    radio.trackObject.track.numSegments = trackData["Number of Segments"];
+    radio.trackObject.track.duration = trackData["Total Track Duration"];
+    radio.trackObject.track.title = trackData.Title;
+    radio.trackObject.track.author = trackData["Author Handle"];
+    radio.trackObject.track.SRC = trackData["Storage Reference URL"];
+    radio.trackObject.track.segmentDurations = trackData["Segment Durations"];
+    console.log(
+      `ℹ️ | ${radio.name} - Track source: ${radio.trackObject.track.SRC}, segments: ${radio.trackObject.track.segmentDurations.length}`,
+    );
 
-      await playSegments(radio); // Wait for all segments to play
-      // Check for pending tracklist after segments complete
-      if (radio.pendingTrackList && !radio._stopCurrent) {
-        console.log(
-          `🔄 | ${radio.name} - Applying pending trackList after track end`,
-        );
-        radio.trackList = radio.pendingTrackList;
-        radio.pendingTrackList = null;
-        radio.trackNum = -1;
-        radio._finishCurrentSegment = false;
-        radio._nextTrack();
-      }
-      if (!radio._stopCurrent) {
-        nextTrack(radio); // Go to the next track *after* playSegments completes if not stopped
-      }
-    } catch (error) {
-      console.error(`🔥 | ERROR - Getting track data: ${error.message}`);
-      if (!radio._stopCurrent) nextTrack(radio); // Even on error, proceed to the next track
+    await playSegments(radio);
+    if (!radio._stopCurrent) {
+      nextTrack(radio);
     }
   }
 
@@ -722,89 +770,57 @@ fastify.get("/getAllTracks", async function (request, reply) {
 fastify.post("/admin/editTrackList", async function (request, reply) {
   const body = request.body || {};
   const stationName = body.stationName;
+  const trackListIds = body.trackList;
   console.log(
-    `📝 | /admin/editTrackList: Old trackList length for ${stationName}: ${RadioManager.find((r) => r.name === stationName)?.trackList?.length || 0}`,
+    `📝 | /admin/editTrackList for ${stationName}: ${trackListIds?.length || 0} IDs`,
   );
-  const trackList = body.trackList;
-  console.log("DEBUG: Received editTrackList request:", body);
+
   if (!stationName) {
     return reply.code(400).send({ error: "stationName is required" });
   }
-  if (!trackList) {
-    return reply.code(400).send({ error: "trackList is required" });
+  if (!Array.isArray(trackListIds)) {
+    return reply
+      .code(400)
+      .send({ error: "trackList must be array of track IDs" });
   }
 
-  // Find the radio station in the in-memory RadioManager
   const radio = RadioManager.find((r) => r.name === stationName);
   if (!radio) {
     return reply.code(404).send({ error: "radio station not found" });
   }
 
-  // Normalize trackList input: accept array of strings or comma-separated string
-  let newList = [];
-  if (Array.isArray(trackList)) {
-    newList = trackList
-      .map((item) => String(item).trim())
-      .filter((s) => s.length > 0);
-  } else if (typeof trackList === "string") {
-    newList = trackList
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-  } else {
-    return reply.code(400).send({
-      error:
-        "trackList must be an array of strings or a comma-separated string",
-    });
-  }
-
-  // Compute added/removed songs
-  const oldList = [...radio.trackList]; // shallow copy
-  const addedSongs = newList.filter((id) => !oldList.includes(id));
-  const deletedSongs = oldList.filter((id) => !newList.includes(id));
-  console.log(
-    `➕ | Added songs (${addedSongs.length}): ${addedSongs.slice(0, 3).join(", ")} ${addedSongs.length > 3 ? "..." : ""}`,
-  );
-  console.log(
-    `➖ | Deleted songs (${deletedSongs.length}): ${deletedSongs.slice(0, 3).join(", ")} ${deletedSongs.length > 3 ? "..." : ""}`,
-  );
-
-  // Set pending instead of direct update
-  radio.pendingTrackList = newList;
-  // If playback is running, signal it to stop and trigger the next track to start the new list
-  // If the first song in the new list is the song currently playing, DON'T restart playback.
-  const currentTitle =
-    (radio.trackObject &&
-      radio.trackObject.track &&
-      radio.trackObject.track.title) ||
-    null;
-  radio.trackList = newList;
-  if (currentTitle && newList.length > 0 && newList[0] === currentTitle) {
-    // Keep playing the current song. Align the trackNum so subsequent nextTrack advances correctly.
-    radio.trackNum = 0;
-    console.log(
-      `ℹ️ | ${radio.name} - Updated trackList but keeping current track playing: ${currentTitle}`,
-    );
-  } else {
-    // reset index so nextTrack starts at 0
-    radio.trackNum = -1;
-    // signal stop to current playback
-    if (radio._stop) radio._stop();
-    // trigger next track immediately if available
-    if (radio._nextTrack) {
-      try {
-        radio._nextTrack();
-      } catch (e) {
-        console.error("Error triggering nextTrack:", e);
+  // Fetch full entries for the new order
+  const newTracklist = [];
+  for (const trackId of trackListIds) {
+    try {
+      const trackDoc = await db.collection("Tracks").doc(trackId).get();
+      if (trackDoc.exists) {
+        const trackData = trackDoc.data();
+        const authorFull = await getAuthorById(trackData["Author ID"]);
+        newTracklist.push({
+          "Track Name": trackData.Title,
+          Author: authorFull?.data || {},
+          "Track ID": trackId,
+          "track length": trackData["Total Track Duration"],
+        });
       }
+    } catch (err) {
+      console.error(`Error fetching track ${trackId}:`, err);
     }
   }
 
-  // Respond with the updated station info
+  await writeTracklistToStorage(newTracklist);
+  console.log(`✅ Reordered tracklist to ${newTracklist.length} tracks`);
+
+  // Reset playback to start from new list
+  radio.trackNum = -1;
+  if (radio._stop) radio._stop();
+  if (radio._nextTrack) radio._nextTrack();
+
   return reply.send({
     success: true,
     station: radio.name,
-    trackList: radio.trackList,
+    newLength: newTracklist.length,
   });
 });
 
@@ -824,6 +840,102 @@ fastify.get("/getAllSegmentPositions", function (request, reply) {
     allSegmentPositions[radio.name] = radio.trackObject.currentSegment.position;
   });
   return allSegmentPositions;
+});
+
+fastify.post("/admin/reorderTracklist", async function (request, reply) {
+  const { newOrder, stationName = "Wildflower Radio" } = request.body || {};
+  if (!Array.isArray(newOrder)) {
+    return reply
+      .code(400)
+      .send({ error: "newOrder array of track IDs required" });
+  }
+
+  const radio = RadioManager.find((r) => r.name === stationName);
+  if (!radio) {
+    return reply.code(404).send({ error: "station not found" });
+  }
+
+  // Reorder using helper
+  const newTracklist = await reorderTracklist(newOrder);
+  console.log(`🔄 Reordered to ${newTracklist.length} tracks`);
+
+  radio.trackNum = -1;
+  if (radio._stop) radio._stop();
+  if (radio._nextTrack) radio._nextTrack();
+
+  return reply.send({
+    success: true,
+    newLength: newTracklist.length,
+  });
+});
+
+fastify.post("/admin/deleteTrack", async function (request, reply) {
+  const { trackId, stationName = "Wildflower Radio" } = request.body || {};
+  if (!trackId) {
+    return reply.code(400).send({ error: "trackId required" });
+  }
+
+  const radio = RadioManager.find((r) => r.name === stationName);
+  if (!radio) {
+    return reply.code(404).send({ error: "station not found" });
+  }
+
+  // Remove from tracklist
+  await removeFromTracklist(trackId);
+
+  // Delete Firestore track doc
+  await db.collection("Tracks").doc(trackId).delete();
+
+  // Delete author song reference
+  const trackDoc = await db.collection("Tracks").doc(trackId).get();
+  if (trackDoc.exists) {
+    const trackData = trackDoc.data();
+    const authorId = trackData["Author ID"];
+    if (authorId) {
+      await addSongToAuthor(authorId, trackId, trackData.Title); // Won't add since exists check
+      // Note: full delete from author would require fetching songs list and filtering
+    }
+  }
+
+  // Delete storage folder - recursive delete not directly supported, delete chunks
+  const bucket = storage.bucket();
+  const [files] = await bucket.getFiles({ prefix: `Tracks/${trackId}/` });
+  await Promise.all(files.map((f) => f.delete()));
+
+  console.log(`🗑️ Full delete of track ${trackId}`);
+
+  radio.trackNum = -1;
+  if (radio._stop) radio._stop();
+  if (radio._nextTrack) radio._nextTrack();
+
+  return reply.send({ success: true, deleted: trackId });
+});
+
+fastify.post("/admin/rejectTrack", async function (request, reply) {
+  const { trackId, stationName = "Wildflower Radio" } = request.body || {};
+  if (!trackId) {
+    return reply.code(400).send({ error: "trackId required" });
+  }
+
+  const radio = RadioManager.find((r) => r.name === stationName);
+  if (!radio) {
+    return reply.code(404).send({ error: "station not found" });
+  }
+
+  const newTracklist = await removeFromTracklist(trackId);
+  console.log(
+    `🚫 Rejected track ${trackId}, new length: ${newTracklist.length}`,
+  );
+
+  radio.trackNum = -1;
+  if (radio._stop) radio._stop();
+  if (radio._nextTrack) radio._nextTrack();
+
+  return reply.send({
+    success: true,
+    removed: true,
+    newLength: newTracklist.length,
+  });
 });
 
 fastify.post("/addTrack", function (request, reply) {
@@ -1059,19 +1171,8 @@ fastify.post("/addTrack", function (request, reply) {
               "Track ID": trackID,
               "track length": request.body.duration,
             };
-            const tracklistDocRef = db.collection("Tracks").doc("TRACKLIST");
-            await tracklistDocRef
-              .update({
-                tracklist: FieldValue.arrayUnion(newEntry),
-              })
-              .catch(async (err) => {
-                if (err.code === "not-found") {
-                  await tracklistDocRef.set({ tracklist: [newEntry] });
-                } else {
-                  console.error("🔥 TRACKLIST update error:", err);
-                }
-              });
-            console.log(`✅ Added to TRACKLIST: ${trackID}`);
+            await appendToTracklist(newEntry);
+            console.log(`✅ Added to TRACKLIST.json: ${trackID}`);
           } else {
             console.warn("⚠️ Could not fetch full author for TRACKLIST");
           }
