@@ -20,6 +20,7 @@ fastify.register(require("@fastify/view"), {
     handlebars: require("handlebars"),
   },
 });
+
 fastify.register(require("@fastify/cors"), {
   origin: "https://radiowildflower.netlify.app",
   methods: ["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"],
@@ -171,7 +172,7 @@ function getDatabaseFile(collection, fileName, func = () => {}) {
 }
 
 function setDatabaseFile(collection, fileName, data) {
-  console.log(`🗒️ | Setting /{collection}/{fileName} to:  ${data}`);
+  console.log(`🗒️ | Setting /{collection}/{fileName} to: \n ${data}`);
   // Return the Promise so callers can await this operation
   return db.collection(collection).doc(fileName).set(data);
 }
@@ -238,7 +239,7 @@ async function getOrCreateAuthor(authorName) {
 async function addSongToAuthor(authorId, songId, songTitle) {
   if (!authorId || !songId || !songTitle) {
     console.warn(
-      `⚠️ | addSongToAuthor: Missing required parameters` +
+      `⚠️ | addSongToAuthor: Missing required parameters\n` +
         `   authorId: ${authorId ? "✓" : "✗"}, songId: ${songId ? "✓" : "✗"}, songTitle: ${songTitle ? "✓" : "✗"}`,
     );
     return false;
@@ -661,6 +662,7 @@ function playRadioStation(radioStation) {
   }
 
   async function playSegment(radio, segment, trackPosition) {
+    // ... (same as before, but with the crucial position updates and logging)
     console.log(
       `🎵 | ${radio.name} - Playing segment #${radio.trackObject.track.numCurrentSegment}`,
     );
@@ -786,8 +788,7 @@ fastify.get("/getAllTracks", async function (request, reply) {
     snapshot.forEach((doc) => {
       const data = doc.data() || {};
       tracks.push({
-        id: doc.id,
-        title: data.Title || doc.id,
+        title: doc.id,
         author: data["Author Handle"] || null,
         authorId: data["Author ID"] || data.authorId || null,
         duration: data["Total Track Duration"] || null,
@@ -807,7 +808,7 @@ fastify.get("/getAllTracks", async function (request, reply) {
 // Edit the trackList for a given radio station
 // Protected under /admin so Basic Auth will be required by the existing hook
 // Expects JSON body: { stationName: string, trackList: string[] | string }
-fastify.get("/admin/editTrackList", async function (request, reply) {
+fastify.post("/admin/editTrackList", async function (request, reply) {
   const body = request.body || {};
   const stationName = body.stationName;
   const trackListIds = body.trackList;
@@ -891,7 +892,7 @@ fastify.get("/getAllSegmentPositions", function (request, reply) {
   return allSegmentPositions;
 });
 
-fastify.get("/admin/reorderTracklist", async function (request, reply) {
+fastify.post("/admin/reorderTracklist", async function (request, reply) {
   const { newOrder, stationName = "Wildflower Radio" } = request.body || {};
   if (!Array.isArray(newOrder)) {
     return reply
@@ -924,7 +925,7 @@ fastify.get("/admin/reorderTracklist", async function (request, reply) {
   });
 });
 
-fastify.get("/admin/deleteTrack", async function (request, reply) {
+fastify.post("/admin/deleteTrack", async function (request, reply) {
   const { trackId, stationName = "Wildflower Radio" } = request.body || {};
   if (!trackId) {
     return reply.code(400).send({ error: "trackId required" });
@@ -972,7 +973,7 @@ fastify.get("/admin/deleteTrack", async function (request, reply) {
   return reply.send({ success: true, deleted: trackId });
 });
 
-fastify.get("/admin/rejectTrack", async function (request, reply) {
+fastify.post("/admin/rejectTrack", async function (request, reply) {
   const { trackId, stationName = "Wildflower Radio" } = request.body || {};
   if (!trackId) {
     return reply.code(400).send({ error: "trackId required" });
@@ -1005,7 +1006,7 @@ fastify.get("/admin/rejectTrack", async function (request, reply) {
   });
 });
 
-fastify.get("/addTrack", function (request, reply) {
+fastify.post("/addTrack", function (request, reply) {
   if (request.body.authPassword !== "password") {
     // return; // incorrect password (disabled for the sake of debugging)
   }
@@ -1174,7 +1175,7 @@ fastify.get("/addTrack", function (request, reply) {
           }
 
           // All chunks processed, manage author and write final DB entry
-          console.log(`🎨 | ══════════════════════════════════════════`);
+          console.log(`\n🎨 | ══════════════════════════════════════════`);
           console.log(`🎨 | Setting up author in Firestore`);
           console.log(`🎨 | ══════════════════════════════════════════`);
 
@@ -1189,7 +1190,7 @@ fastify.get("/addTrack", function (request, reply) {
           const authorId = authorResult.id;
           console.log(`✅ | Author ready: ID=${authorId.substring(0, 8)}...`);
 
-          console.log(`📁 | ══════════════════════════════════════════`);
+          console.log(`\n📁 | ══════════════════════════════════════════`);
           console.log(`📁 | Writing Track metadata to Firestore`);
           console.log(`📁 | ══════════════════════════════════════════`);
 
@@ -1211,7 +1212,7 @@ fastify.get("/addTrack", function (request, reply) {
           console.log(`   ⏱️  | Duration: ${request.body.duration}s`);
 
           // Add song to author's song list
-          console.log(`📋 | ══════════════════════════════════════════`);
+          console.log(`\n📋 | ══════════════════════════════════════════`);
           console.log(`📋 | Adding song to author's collection`);
           console.log(`📋 | ══════════════════════════════════════════`);
 
@@ -1229,7 +1230,7 @@ fastify.get("/addTrack", function (request, reply) {
           }
 
           // Add to TRACKLIST
-          console.log(`📋 | Adding track to TRACKLIST`);
+          console.log(`\n📋 | Adding track to TRACKLIST`);
           const authorFull = await getAuthorById(authorId);
           if (authorFull) {
             const newEntry = {
@@ -1260,7 +1261,7 @@ fastify.get("/addTrack", function (request, reply) {
           }
 
           console.log(
-            `✅✅✅ | /addTrack COMPLETE!   trackID: ${trackID}   total_chunks: ${chunks.length}   total_duration: ${request.body.duration}s   author: ${request.body.author}   title: ${request.body.title}✅✅✅`,
+            `\n✅✅✅ | /addTrack COMPLETE!\n   trackID: ${trackID}\n   total_chunks: ${chunks.length}\n   total_duration: ${request.body.duration}s\n   author: ${request.body.author}\n   title: ${request.body.title}\n✅✅✅\n`,
           );
 
           // Send success response
@@ -1332,7 +1333,7 @@ fastify.get("/getAuthor/:handle", async function (request, reply) {
 });
 
 // Endpoint to manually create an author
-fastify.get("/createAuthor", async function (request, reply) {
+fastify.post("/createAuthor", async function (request, reply) {
   try {
     const authorName = request.body?.authorName;
     console.log(`📡 | POST /createAuthor requested for: ${authorName}`);
@@ -1358,7 +1359,7 @@ fastify.get("/createAuthor", async function (request, reply) {
 });
 
 // Endpoint to manually add a song to an author
-fastify.get("/addSongToAuthor", async function (request, reply) {
+fastify.post("/addSongToAuthor", async function (request, reply) {
   try {
     const { authorId, songId, songTitle } = request.body || {};
     console.log(`📡 | POST /addSongToAuthor requested`);
