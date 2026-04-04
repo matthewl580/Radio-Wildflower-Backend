@@ -20,7 +20,6 @@ fastify.register(require("@fastify/view"), {
     handlebars: require("handlebars"),
   },
 });
-
 fastify.register(require("@fastify/cors"), {
   origin: "https://radiowildflower.netlify.app",
   methods: ["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"],
@@ -787,7 +786,8 @@ fastify.get("/getAllTracks", async function (request, reply) {
     snapshot.forEach((doc) => {
       const data = doc.data() || {};
       tracks.push({
-        id: doc.id,        title: data.Title || doc.id,
+        id: doc.id,
+        title: data.Title || doc.id,
         author: data["Author Handle"] || null,
         authorId: data["Author ID"] || data.authorId || null,
         duration: data["Total Track Duration"] || null,
