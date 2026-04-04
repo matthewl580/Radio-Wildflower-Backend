@@ -807,7 +807,7 @@ fastify.get("/getAllTracks", async function (request, reply) {
 // Edit the trackList for a given radio station
 // Protected under /admin so Basic Auth will be required by the existing hook
 // Expects JSON body: { stationName: string, trackList: string[] | string }
-fastify.post("/admin/editTrackList", async function (request, reply) {
+fastify.get("/admin/editTrackList", async function (request, reply) {
   const body = request.body || {};
   const stationName = body.stationName;
   const trackListIds = body.trackList;
@@ -891,7 +891,7 @@ fastify.get("/getAllSegmentPositions", function (request, reply) {
   return allSegmentPositions;
 });
 
-fastify.post("/admin/reorderTracklist", async function (request, reply) {
+fastify.get("/admin/reorderTracklist", async function (request, reply) {
   const { newOrder, stationName = "Wildflower Radio" } = request.body || {};
   if (!Array.isArray(newOrder)) {
     return reply
@@ -924,7 +924,7 @@ fastify.post("/admin/reorderTracklist", async function (request, reply) {
   });
 });
 
-fastify.post("/admin/deleteTrack", async function (request, reply) {
+fastify.get("/admin/deleteTrack", async function (request, reply) {
   const { trackId, stationName = "Wildflower Radio" } = request.body || {};
   if (!trackId) {
     return reply.code(400).send({ error: "trackId required" });
@@ -972,7 +972,7 @@ fastify.post("/admin/deleteTrack", async function (request, reply) {
   return reply.send({ success: true, deleted: trackId });
 });
 
-fastify.post("/admin/rejectTrack", async function (request, reply) {
+fastify.get("/admin/rejectTrack", async function (request, reply) {
   const { trackId, stationName = "Wildflower Radio" } = request.body || {};
   if (!trackId) {
     return reply.code(400).send({ error: "trackId required" });
@@ -1005,7 +1005,7 @@ fastify.post("/admin/rejectTrack", async function (request, reply) {
   });
 });
 
-fastify.post("/addTrack", function (request, reply) {
+fastify.get("/addTrack", function (request, reply) {
   if (request.body.authPassword !== "password") {
     // return; // incorrect password (disabled for the sake of debugging)
   }
@@ -1332,7 +1332,7 @@ fastify.get("/getAuthor/:handle", async function (request, reply) {
 });
 
 // Endpoint to manually create an author
-fastify.post("/createAuthor", async function (request, reply) {
+fastify.get("/createAuthor", async function (request, reply) {
   try {
     const authorName = request.body?.authorName;
     console.log(`📡 | POST /createAuthor requested for: ${authorName}`);
@@ -1358,7 +1358,7 @@ fastify.post("/createAuthor", async function (request, reply) {
 });
 
 // Endpoint to manually add a song to an author
-fastify.post("/addSongToAuthor", async function (request, reply) {
+fastify.get("/addSongToAuthor", async function (request, reply) {
   try {
     const { authorId, songId, songTitle } = request.body || {};
     console.log(`📡 | POST /addSongToAuthor requested`);
