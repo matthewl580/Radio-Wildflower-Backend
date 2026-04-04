@@ -436,7 +436,7 @@ async function start() {
   // Ensure initial TRACKLIST.json exists
   await writeTracklistToStorage([]);
   RadioManager.forEach((radio) => console.log(`→ Station: ${radio.name}`));
-  RadioManager.forEach((radio) => playRadioStation(radio)); // Play all stations simultaneously
+  RadioManager[0] && playRadioStation(RadioManager[0]); // Play only first station
 }
 
 function playRadioStation(radioStation) {
