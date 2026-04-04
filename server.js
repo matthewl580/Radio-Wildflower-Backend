@@ -450,11 +450,29 @@ function playRadioStation(radioStation) {
     const tracklist = await readTracklistFromStorage();
     if (tracklist.length === 0) {
       console.warn(`⚠️ | ${radio.name} has empty tracklist.`);
+      radio.trackNum = 0;
+      radio.currentTrackId = null;
       return;
+    }
+
+    // Safety: ensure trackNum is valid
+    if (radio.trackNum >= tracklist.length) {
+      console.log(
+        `🔧 | ${radio.name} - trackNum ${radio.trackNum} out of bounds → reset to 0`,
+      );
+      radio.trackNum = 0;
     }
 
     radio.trackNum = (radio.trackNum + 1) % tracklist.length;
     const trackEntry = tracklist[radio.trackNum];
+    if (!trackEntry || !trackEntry["Track ID"]) {
+      console.warn(
+        `⚠️ | ${radio.name} - Invalid trackEntry at ${radio.trackNum}, skipping to next`,
+      );
+      radio.trackNum = 0;
+      return nextTrack(radio);
+    }
+
     const trackId = trackEntry["Track ID"];
 
     console.log(
@@ -534,6 +552,59 @@ function playRadioStation(radioStation) {
 
   // Expose nextTrack so external code (admin endpoint) can trigger immediate start
   radioStation._nextTrack = () => nextTrack(radioStation);
+
+  // New helper: Handle deletion of current track mid-playback
+  async function handleTrackDeleted(radio) {
+    console.log(
+      `🛑 | ${radio.name} - handleTrackDeleted invoked for track ${radio.currentTrackId?.substring(0, 8)}...`,
+    );
+
+    // Immediate stop
+    radio._stopCurrent = true;
+    radio._finishCurrentSegment = true;
+
+    // Wait brief moment for loops to exit
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // Reload fresh tracklist
+    const newTracklist = await readTracklistFromStorage();
+    console.log(
+      `📋 | ${radio.name} - Fresh tracklist length: ${newTracklist.length}`,
+    );
+
+    if (newTracklist.length === 0) {
+      console.log(
+        `⚠️ | ${radio.name} - Empty tracklist after delete, stopping`,
+      );
+      radio.trackNum = 0;
+      radio.currentTrackId = null;
+      return;
+    }
+
+    // Reset position safely
+    if (
+      !radio.currentTrackId ||
+      !newTracklist.some((entry) => entry["Track ID"] === radio.currentTrackId)
+    ) {
+      // Current track deleted, start from beginning
+      radio.trackNum = 0;
+      console.log(
+        `🔄 | ${radio.name} - Current track deleted → reset to track 0`,
+      );
+    } else {
+      // Adjust position to valid
+      radio.trackNum = radio.trackNum % newTracklist.length;
+      console.log(
+        `🔄 | ${radio.name} - Adjusted trackNum to ${radio.trackNum} (valid range)`,
+      );
+    }
+
+    radio.currentTrackId = null;
+
+    // Resume playback
+    console.log(`▶️ | ${radio.name} - Resuming from adjusted position`);
+    nextTrack(radio);
+  }
   // Clear gentle stop flags when starting new track
   radioStation._finishCurrentSegment = false;
   radioStation._gentleStop = () => {
@@ -694,9 +765,22 @@ function playRadioStation(radioStation) {
       await cancellableSleep(radio, 1000); // Simulate 1-second increments with cancellable sleep
       radio.trackObject.currentSegment.position = position + 1;
       radio.trackObject.track.position = trackPosition + position + 1; // Update total track position
-      console.log(
-        `${radio.name} - Track Position: ${radio.trackObject.track.position}, Segment Position: ${radio.trackObject.currentSegment.position}`,
-      );
+
+      // Safety check before logging - reload list to validate current state
+      const currentList = await readTracklistFromStorage();
+      if (radio.trackNum >= currentList.length || radio.trackNum < 0) {
+        console.log(
+          `⚠️ | ${radio.name} - Invalid trackNum ${radio.trackNum} (list length: ${currentList.length}) → stopping`,
+        );
+        radio._stopCurrent = true;
+        return;
+      }
+
+      if (!radio._stopCurrent) {
+        console.log(
+          `${radio.name} - Track Position: ${radio.trackObject.track.position}, Segment Position: ${radio.trackObject.currentSegment.position}`,
+        );
+      }
     }
   }
 
@@ -960,14 +1044,16 @@ fastify.post("/admin/deleteTrack", async function (request, reply) {
 
   console.log(`🗑️ Full delete of track ${trackId}`);
 
-  // Smart interrupt after delete
-  const freshList = await readTracklistFromStorage();
-  const firstId = freshList[0]?.["Track ID"];
-  if (firstId && firstId !== radio.currentTrackId) {
-    console.log(`⏹️→▶️ | Delete: first changed → nextTrack`);
-    if (radio._nextTrack) radio._nextTrack();
+  // Handle current track delete properly
+  if (radio.currentTrackId === trackId) {
+    console.log(
+      `🎯 | ${radio.name} - Current track deleted → handleTrackDeleted`,
+    );
+    await handleTrackDeleted(radio);
   } else {
-    console.log(`⏯️ | Delete: first same, no interrupt`);
+    console.log(
+      `ℹ️ | ${radio.name} - Track deleted (not current), continuing...`,
+    );
   }
 
   return reply.send({ success: true, deleted: trackId });
