@@ -470,8 +470,6 @@ function playRadioStation(radioStation) {
         `🔄 | ${radio.name} - End of playlist reached (${tracklist.length} tracks), resetting to 0`,
       );
       nextTrackNum = 0;
-      radio.trackNum = 0;
-      playRadioStation(RadioManager[0])
     }
     radio.trackNum = nextTrackNum;
     const trackEntry = tracklist[radio.trackNum];
@@ -712,7 +710,10 @@ function playRadioStation(radioStation) {
       `ℹ️ | ${radio.name} - Track source: ${radio.trackObject.track.SRC}, segments: ${radio.trackObject.track.segmentDurations.length}`,
     );
 
-    await playSegments(radio);    // EXPLICIT: Always play next track after segments end (fix pausing)\n    console.log(`🔄 | ${radio.name} - Track END → NEXT (unconditional)`);\n    radio._stopCurrent = false; // Reset flag\n    try {\n      const freshTracklist = await readTracklistFromStorage();\n      if (freshTracklist.length === 0) {\n        console.warn(`⚠️ | ${radio.name} - Empty tracklist after track end, waiting...`);\n      } else {\n        await nextTrack(radio);\n      }\n    } catch (err) {\n      console.error(`🔥 | ${radio.name} - Next track failed:`, err.message);\n      // Retry once\n      setTimeout(() => nextTrack(radio).catch(console.error), 2000);\n    }
+    await playSegments(radio);
+    if (!radio._stopCurrent) {
+      nextTrack(radio);
+    }
   }
 
   async function playSegments(radio) {
@@ -811,7 +812,14 @@ function playRadioStation(radioStation) {
       radio.trackObject.track.position = trackPosition + position + 1; // Update total track position
 
       // Safety check before logging - reload list to validate current state
-      // Safety check moved outside loop - only log, don't stop playback\n      const currentList = await readTracklistFromStorage();\n      if (radio.trackNum >= currentList.length || radio.trackNum < 0) {\n        console.warn(\n          `⚠️ | ${radio.name} - Invalid trackNum ${radio.trackNum} (list length: ${currentList.length}), continuing segment...`,\n        );\n        // Don't set _stopCurrent - let track finish\n      }
+      const currentList = await readTracklistFromStorage();
+      if (radio.trackNum >= currentList.length || radio.trackNum < 0) {
+        console.log(
+          `⚠️ | ${radio.name} - Invalid trackNum ${radio.trackNum} (list length: ${currentList.length}) → stopping`,
+        );
+        radio._stopCurrent = true;
+        return;
+      }
 
       if (!radio._stopCurrent) {
         console.log(
