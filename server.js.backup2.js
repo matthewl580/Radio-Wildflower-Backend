@@ -402,9 +402,6 @@ async function loadTracklistFromFirestore() {
 // Single radio station configuration
 const radioStation = {
   name: "Wildflower Radio",
-  lastRecovery: 0,
-  recoveryCount: 0,
-  loopCounter: 0,
 };
 console.log(
   `ℹ️ | Configured single radio station: ${radioStation.name} (trackList from Storage JSON)`,
@@ -501,21 +498,10 @@ function playRadioStation(radioStation) {
     radio.currentTrackId = trackId;
 
     if (oldTrackId && oldTrackId === trackId) {
-      radio.loopCounter++;
-      if (radio.loopCounter > 3 && radio.loopList?.length === 1) {
-        console.log(
-          `🔄 | ${radio.name} - LOOP BREAK: 3+ single track loops → force recovery`,
-        );
-        radio.loopCounter = 0;
-        handleEmptyTracklist(radio, "loopCounter");
-        return;
-      }
       console.log(
-        `⏯️ | ${radio.name} - Continuing same track ${trackId.substring(0, 8)}... (loop#${radio.loopCounter})`,
+        `⏯️ | ${radio.name} - Continuing same track ${trackId.substring(0, 8)}... (trackNum advanced)`,
       );
       return; // No interrupt needed
-    } else {
-      radio.loopCounter = 0; // Reset on track change
     }
 
     console.log(
@@ -568,9 +554,7 @@ function playRadioStation(radioStation) {
             );
           }
         } else {
-          console.log(
-            `ℹ️ | ${radio.name} - ≤1 track (${tracklist.length}), skipping rotation`,
-          );
+          console.log(`ℹ️ | ${radio.name} - Single track, skipping rotation`);
         }
       } catch (rotateErr) {
         console.error(
@@ -642,32 +626,10 @@ function playRadioStation(radioStation) {
   }
 
   // ENHANCED: Handle empty/run-out/deletion (exact 4 steps)
-  async function handleEmptyTracklist(radio, caller = "unknown") {
-    const now = Date.now();
-    // DEBOUNCE + MIN TRACKS GUARD (Fix #1: Prevent loop spam)
-    if (now - radio.lastRecovery < 300) {
-      console.log(
-        `⏳ | ${radio.name} - Recovery skipped (debounce): called by ${caller}`,
-      );
-      return;
-    }
-    if ((await readTracklistFromStorage()).length < 3) {
-      console.log(
-        `🛡️ | ${radio.name} - Recovery skipped (too few tracks <3): ${caller}`,
-      );
-      return;
-    }
-
+  async function handleEmptyTracklist(radio) {
     console.log(
-      `🔄 | ${radio.name} - Refilling tracklist: executing 4-step recovery... (caller: ${caller})`,
+      `🔄 | ${radio.name} - Refilling tracklist: executing 4-step recovery...`,
     );
-    radio.recoveryCount++;
-    radio.lastRecovery = now;
-    if (radio.recoveryCount > 5) {
-      console.error(
-        `🚨 | ${radio.name} - HIGH RECOVERY COUNT #${radio.recoveryCount} (${caller}) - POTENTIAL LOOP DETECTED!`,
-      );
-    }
 
     // 1. Download new tracklist from Firebase Storage
     console.log(
@@ -693,40 +655,19 @@ function playRadioStation(radioStation) {
       return;
     }
 
-    // 4. CONDITIONAL RESUME + SINGLE-TRACK ADVANCE (Fix #2)
+    // 4. Play currently playing Firebase track (resume logical position)
     console.log(
-      `   ▶️ | Step 4: Resuming from Firebase position ${radio.trackNum}... (len=${tracklist.length})`,
+      `   ▶️ | Step 4: Resuming from Firebase position ${radio.trackNum}...`,
     );
     // Validate position post-refill
     if (radio.trackNum >= tracklist.length || radio.trackNum < 0) {
       console.log(`   🔧 | Resetting invalid position ${radio.trackNum} → 0`);
       radio.trackNum = 0;
     }
-    // SINGLE-TRACK LOOP BREAK: Force advance/refresh if still 1 track
-    if (tracklist.length === 1) {
-      console.log(
-        `🔄 | ${radio.name} - Single track detected → force next cycle advance`,
-      );
-      radio.trackNum = 0; // Ensure reset
-    }
     delete radio.pendingTrackList; // Clear temp after resume
-    console.log(
-      `✅ | All 4 steps complete: Refilled → Stopped → Resumed | Count: ${radio.recoveryCount}`,
-    );
+    console.log(`✅ | All 4 steps complete: Refilled → Stopped → Resumed`);
 
-    if (
-      (tracklist.length > 1 && radio.trackNum < tracklist.length) ||
-      (tracklist.length === 1 && radio.trackNum === 0)
-    ) {
-      console.log(
-        `▶️ | RESUME OK: len=${tracklist.length}, pos=${radio.trackNum} (${caller})`,
-      );
-      nextTrack(radio);
-    } else {
-      console.log(
-        `🛡️ | Skipped resume (${caller}): len=${tracklist.length}, trackNum=${radio.trackNum} (invalid pos)`,
-      );
-    }
+    nextTrack(radio); // Guaranteed non-empty
   }
 
   radioStation._gentleStop = () => {
@@ -888,8 +829,15 @@ function playRadioStation(radioStation) {
       radio.trackObject.currentSegment.position = position + 1;
       radio.trackObject.track.position = trackPosition + position + 1; // Update total track position
 
-      // FIXED: Removed expensive per-second tracklist reload (loop cause #1)
-      // Bounds check using cached trackList.length at segment start
+      // Safety check before logging - reload list to validate current state
+      const currentList = await readTracklistFromStorage();
+      if (radio.trackNum >= currentList.length || radio.trackNum < 0) {
+        console.log(
+          `⚠️ | ${radio.name} - Invalid trackNum ${radio.trackNum} (list length: ${currentList.length}) → stopping`,
+        );
+        radio._stopCurrent = true;
+        return;
+      }
 
       if (!radio._stopCurrent) {
         console.log(
