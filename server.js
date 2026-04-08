@@ -898,52 +898,33 @@ fastify.get("/getAllTrackInformation", async function (request, reply) {
   try {
     const allTrackInfo = {};
     // Gather info for each radio station (only 1 currently) and next track preview
-    await Promise.all(
-      RadioManager.map(async (radio) => {
-        console.log(`ℹ️ | Gathering track info for ${radio.name}`);
-        // Shallow clone to avoid mutating runtime state
-        const info = JSON.parse(JSON.stringify(radio.trackObject));
+    console.log(`ℹ️ | Gathering track info for ${radio.name}`);
+    // Shallow clone to avoid mutating runtime state
+    const info = JSON.parse(JSON.stringify(radio.trackObject));
 
-        // Use pendingTrackList if available, else current trackList
-        const effectiveTrackList = radio.pendingTrackList || radio.trackList;
-        let nextTrackStorageURL = null;
+    // Use pendingTrackList if available, else current trackList (simplified: use empty)
+    let nextTrackStorageURL = null;
 
-        try {
-          if (
-            Array.isArray(effectiveTrackList) &&
-            effectiveTrackList.length > 0
-          ) {
-            const nextIndex =
-              typeof radio.trackNum === "number"
-                ? (radio.trackNum + 1) % effectiveTrackList.length
-                : 0;
-            const nextId = effectiveTrackList[nextIndex];
-            if (nextId) {
-              const doc = await db
-                .collection("Tracks")
-                .doc(String(nextId))
-                .get();
-              const data = doc.exists ? doc.data() : null;
-              nextTrackStorageURL =
-                data?.["Storage Reference URL"] ||
-                data?.storageReferenceURL ||
-                null;
-              console.log(
-                `ℹ️ | ${radio.name} - Next track preview: ${nextTrackStorageURL ? nextId.substring(0, 8) + "..." : "none"} (${radio.pendingTrackList ? "pending" : "active"} list)`,
-              );
-            }
-          }
-        } catch (err) {
-          console.error(
-            `🔥 | ${radio.name} - Error fetching next track URL:`,
-            err.message,
-          );
+    try {
+      const tracklist = await getCachedTracklist(radio);
+      if (tracklist.length > 0) {
+        const nextIndex = (radio.trackNum + 1) % tracklist.length;
+        const nextId = tracklist[nextIndex]["Track ID"];
+        if (nextId) {
+          const doc = await db.collection("Tracks").doc(nextId).get();
+          const data = doc.exists ? doc.data() : null;
+          nextTrackStorageURL = data?.["Storage Reference URL"] || null;
         }
+      }
+    } catch (err) {
+      console.error(
+        `🔥 | ${radio.name} - Error fetching next track URL:`,
+        err.message,
+      );
+    }
 
-        info.nextTrackStorageURL = nextTrackStorageURL;
-        allTrackInfo[radio.name] = info;
-      }),
-    );
+    info.nextTrackStorageURL = nextTrackStorageURL;
+    allTrackInfo[radio.name] = info;
     console.log(
       `ℹ️ | /getAllTrackInformation returning data for ${Object.keys(allTrackInfo).length} station(s):`,
       Object.keys(allTrackInfo),
@@ -958,11 +939,16 @@ fastify.get("/getAllTrackInformation", async function (request, reply) {
 });
 
 // Returns the current radio station
-fastify.get("/stations", function (request, reply) {
+fastify.get("/stations", async function (request, reply) {
   try {
     // Return the single radio station info (name, trackList)
     reply.header("Content-Type", "application/json");
-    return [radioStation];
+    return [
+      {
+        name: radio.name,
+        trackList: (await readTracklistFromStorage()).map((t) => t["Track ID"]),
+      },
+    ];
   } catch (err) {
     console.error("🔥 | ERROR - getting stations:", err);
     reply.code(500).send({ error: "Failed to fetch stations" });
@@ -1107,65 +1093,37 @@ fastify.post("/admin/reorderTracklist", async function (request, reply) {
 });
 
 fastify.post("/admin/deleteTrack", async function (request, reply) {
-  const { trackId, stationName = "Wildflower Radio" } = request.body || {};
+  const { trackId } = request.body || {};
   if (!trackId) {
     return reply.code(400).send({ error: "trackId required" });
   }
 
-  const radio = RadioManager.find((r) => r.name === stationName);
-  if (!radio) {
-    return reply.code(404).send({ error: "station not found" });
-  }
-
-  // Remove from tracklist
+  // Single station
   await removeFromTracklist(trackId);
 
   // Delete Firestore track doc
   await db.collection("Tracks").doc(trackId).delete();
 
-  // Delete author song reference
-  const trackDoc = await db.collection("Tracks").doc(trackId).get();
-  if (trackDoc.exists) {
-    const trackData = trackDoc.data();
-    const authorId = trackData["Author ID"];
-    if (authorId) {
-      await addSongToAuthor(authorId, trackId, trackData.Title); // Won't add since exists check
-      // Note: full delete from author would require fetching songs list and filtering
-    }
-  }
-
-  // Delete storage folder - recursive delete not directly supported, delete chunks
+  // Delete storage folder
   const bucket = storage.bucket();
   const [files] = await bucket.getFiles({ prefix: `Tracks/${trackId}/` });
   await Promise.all(files.map((f) => f.delete()));
 
   console.log(`🗑️ Full delete of track ${trackId}`);
 
-  // Handle current/next track delete properly (generalized)
-  const resetCheck = await needsPlaybackReset(radio, trackId);
-  if (resetCheck.needsReset) {
-    console.log(
-      `🎯 | ${radio.name} - ${resetCheck.reason} → handleTrackDeleted`,
-    );
-    await handleTrackDeleted(radio);
-  } else {
-    console.log(
-      `ℹ️ | ${radio.name} - Track deleted (not current/next), continuing...`,
-    );
+  // Reset playback if current track deleted
+  if (radio.currentTrackId === trackId) {
+    console.log(`🎯 | Current track deleted → nextTrack`);
+    radio._nextTrack();
   }
 
   return reply.send({ success: true, deleted: trackId });
 });
 
 fastify.post("/admin/rejectTrack", async function (request, reply) {
-  const { trackId, stationName = "Wildflower Radio" } = request.body || {};
+  const { trackId } = request.body || {};
   if (!trackId) {
     return reply.code(400).send({ error: "trackId required" });
-  }
-
-  const radio = RadioManager.find((r) => r.name === stationName);
-  if (!radio) {
-    return reply.code(404).send({ error: "station not found" });
   }
 
   const newTracklist = await removeFromTracklist(trackId);
@@ -1173,17 +1131,10 @@ fastify.post("/admin/rejectTrack", async function (request, reply) {
     `🚫 Rejected track ${trackId}, new length: ${newTracklist.length}`,
   );
 
-  // Handle current/next track reject properly (generalized)
-  const resetCheck = await needsPlaybackReset(radio, trackId);
-  if (resetCheck.needsReset) {
-    console.log(
-      `🎯 | ${radio.name} - ${resetCheck.reason} → handleTrackDeleted`,
-    );
-    await handleTrackDeleted(radio);
-  } else {
-    console.log(
-      `ℹ️ | ${radio.name} - Track rejected (not current/next), continuing...`,
-    );
+  // Reset playback if current track rejected
+  if (radio.currentTrackId === trackId) {
+    console.log(`🎯 | Current track rejected → nextTrack`);
+    radio._nextTrack();
   }
 
   return reply.send({
