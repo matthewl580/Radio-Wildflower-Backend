@@ -418,45 +418,55 @@ async function loadTracklistFromFirestore() {
 
 //============================================================= START OF ACTUAL CODE
 
-const radio = {
+// Single radio station configuration
+const radioStation = {
   name: "Wildflower Radio",
-  trackNum: 0,
-  currentTrackId: null,
-  currentInterval: null,
-  pendingTimeouts: [],
-  tracklistCache: { list: [], lastRefresh: 0 },
-  trackObject: {
-    currentSegment: { duration: 0, position: 0, SRC: "" },
-    track: {
-      segmentDurations: [],
-      numSegments: 0,
-      numCurrentSegment: 0,
-      author: "",
-      title: "",
-      duration: 0,
-      position: 0,
-      SRC: "",
+};
+console.log(
+  `ℹ️ | Configured single radio station: ${radioStation.name} (trackList from Storage JSON)`,
+);
+
+var RadioManager = [
+  {
+    name: radioStation.name,
+    trackNum: 0,
+    currentTrackId: null,
+    currentInterval: null,
+    pendingTimeouts: [],
+    tracklistCache: { list: [], lastRefresh: 0 },
+    trackObject: {
+      // Track object specific to this radio station
+      currentSegment: { duration: undefined, position: undefined, SRC: "" },
+      track: {
+        segmentDurations: [],
+        numSegments: undefined,
+        numCurrentSegment: undefined,
+        author: "",
+        title: "",
+        duration: undefined,
+        position: undefined,
+        SRC: "",
+      },
     },
   },
-  isPlaying: false,
-};
-
-console.log(`ℹ️ | Single radio station configured: ${radio.name}`);
+];
 
 async function start() {
-  console.log(`🟢 | Starting radio manager`);
+  console.log(
+    `🟢 | Starting radio manager for ${RadioManager.length} station(s)`,
+  );
   // Ensure initial TRACKLIST.json exists
   await writeTracklistToStorage([]);
-  playRadioStation(radio);
+  RadioManager.forEach((radio) => console.log(`→ Station: ${radio.name}`));
+  RadioManager[0] && playRadioStation(RadioManager[0]); // Play only first station
 }
 
-function playRadioStation(radio) {
-  console.log(`▶️ | playRadioStation() called for ${radio.name}`);
-  radio.isPlaying = true;
+function playRadioStation(radioStation) {
+  console.log(`▶️ | playRadioStation() called for ${radioStation.name}`);
   // Use the radio object's trackNum as the authoritative current track index
-  if (typeof radio.trackNum !== "number") radio.trackNum = -1;
+  if (typeof radioStation.trackNum !== "number") radioStation.trackNum = -1;
   // Flag to indicate immediate stop of current playback
-  radio._stopCurrent = false;
+  radioStation._stopCurrent = false;
 
   async function nextTrack(radio) {
     clearAllTimers(radio);
@@ -584,7 +594,7 @@ function playRadioStation(radio) {
   }
 
   // Expose nextTrack so external code (admin endpoint) can trigger immediate start
-  radio._nextTrack = () => nextTrack(radio);
+  radioStation._nextTrack = () => nextTrack(radioStation);
 
   async function handleTrackDeleted(radio, reason = "unknown") {
     console.log(
@@ -671,16 +681,18 @@ function playRadioStation(radio) {
     }
     return { needsReset: false, reason: "Not current/next" };
   }
-  radio._gentleStop = () => {
-    radio._finishCurrentSegment = true;
+  radioStation._gentleStop = () => {
+    radioStation._finishCurrentSegment = true;
     console.log(
-      `⏸️ | ${radio.name} - gentleStop invoked (finish current segment)`,
+      `⏸️ | ${radioStation.name} - gentleStop invoked (finish current segment)`,
     );
   };
 
-  radio._stop = () => {
-    clearAllTimers(radio);
-    console.log(`⏸️ | ${radio.name} - _stop invoked (with clearAllTimers)`);
+  radioStation._stop = () => {
+    clearAllTimers(radioStation);
+    console.log(
+      `⏸️ | ${radioStation.name} - _stop invoked (with clearAllTimers)`,
+    );
   };
 
   // Helper: cancellable sleep that can be aborted by calling radio._stop()
@@ -817,81 +829,61 @@ function playRadioStation(radio) {
   }
 
   async function playSegment(radio, segment, trackPosition) {
+    clearAllTimers(radio);
+    var position = 0;
+
     console.log(
-      `🎵 | ${radio.name} - playSegment #${radio.trackObject.track.numCurrentSegment + 1}/${radio.trackObject.track.numSegments}`,
+      `🎵 | ${radio.name} - Playing segment #${radio.trackObject.track.numCurrentSegment}`,
+    );
+    radio.trackObject.track.numCurrentSegment++;
+    const chunkPath = `${radio.trackObject.track.SRC}/Chunk_${radio.trackObject.track.numCurrentSegment}.mp3`;
+    console.log(
+      `ℹ️ | ${radio.name} - Fetching segment from storage: ${chunkPath}`,
+    );
+    const segmentData = await getStorageFile(chunkPath);
+    radio.trackObject.currentSegment.SRC = segmentData;
+    radio.trackObject.currentSegment.duration = segment.duration || 30; // Fallback
+    radio.trackObject.currentSegment.position = 0;
+
+    console.log(
+      `▶️ | ${radio.name} - Segment timer started (${segment.duration}s)`,
     );
 
-    if (radio._stopCurrent) {
-      console.log(`⏹️ | ${radio.name} - playSegment cancelled before start`);
-      return Promise.resolve();
-    }
+    // Single master interval for second-by-second position updates
+    radio.currentInterval = setInterval(() => {
+      if (radio._stopCurrent) {
+        console.log(`⏹️ | ${radio.name} - Interval stopped early`);
+        return;
+      }
 
-    clearAllTimers(radio);
+      position++;
+      radio.trackObject.currentSegment.position = position;
+      radio.trackObject.track.position = trackPosition + position;
 
-    const chunkPath = `${radio.trackObject.track.SRC}/Chunk_${radio.trackObject.track.numCurrentSegment + 1}.mp3`;
-    console.log(`🔗 | ${radio.name} - Loading ${chunkPath}`);
+      // Position log removed to reduce spam
 
-    try {
-      const segmentData = await getStorageFile(chunkPath);
-      radio.trackObject.currentSegment = {
-        SRC: segmentData,
-        duration: segment.duration || 30,
-        position: 0,
-      };
+      if (position >= segment.duration) {
+        clearInterval(radio.currentInterval);
+        radio.currentInterval = null;
+        console.log(`✅ | ${radio.name} - Segment complete, advancing`);
+        clearAllTimers(radio); // Cleanup
+      }
+    }, 1000);
 
-      console.log(
-        `▶️ | ${radio.name} - Starting ${radio.trackObject.currentSegment.duration}s timer`,
-      );
-
-      // Promise-based timer with position updates
-      await new Promise((resolve, reject) => {
-        let position = 0;
-        radio.currentInterval = setInterval(() => {
-          if (radio._stopCurrent) {
-            console.log(
-              `⏹️ | ${radio.name} - Segment interrupted at ${position}s`,
-            );
-            clearInterval(radio.currentInterval);
-            radio.currentInterval = null;
-            reject(new Error("Playback stopped"));
-            return;
-          }
-
-          position++;
-          radio.trackObject.currentSegment.position = position;
-          radio.trackObject.track.position = trackPosition + position;
-          console.log(
-            `⏱️ | ${radio.name} - ${position}/${radio.trackObject.currentSegment.duration}s`,
-          );
-
-          if (position >= radio.trackObject.currentSegment.duration) {
-            clearInterval(radio.currentInterval);
-            radio.currentInterval = null;
-            console.log(`✅ | ${radio.name} - Segment COMPLETE`);
-            resolve();
-          }
-        }, 1000);
-
-        // Safety timeout
-        setTimeout(
-          () => {
-            clearInterval(radio.currentInterval);
-            reject(new Error("Segment timeout"));
-          },
-          (radio.trackObject.currentSegment.duration + 5) * 1000,
-        );
-      });
-    } catch (error) {
-      console.error(`🔥 | ${radio.name} - playSegment ERROR:`, error.message);
-      clearAllTimers(radio);
-      throw error;
-    }
-
-    radio.trackObject.track.numCurrentSegment++;
+    // Self-terminate after duration + buffer
+    setTimeout(
+      () => {
+        if (radio.currentInterval) {
+          console.log(`⏰ | ${radio.name} - Segment timeout reached`);
+          clearAllTimers(radio);
+        }
+      },
+      (segment.duration + 2) * 1000,
+    );
   }
 
   // Start the first track
-  nextTrack(radio);
+  nextTrack(radioStation);
 }
 
 fastify.get("/getAllTrackInformation", async function (request, reply) {
@@ -1015,10 +1007,9 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
       .send({ error: "trackList must be array of track IDs" });
   }
 
-  // Single station - ignore stationName param
-  const radioObj = radio;
-  if (stationName !== radio.name) {
-    return reply.code(400).send({ error: "Only Wildflower Radio supported" });
+  const radio = RadioManager.find((r) => r.name === stationName);
+  if (!radio) {
+    return reply.code(404).send({ error: "radio station not found" });
   }
 
   // Fetch full entries for the new order
@@ -1067,12 +1058,20 @@ fastify.post("/admin/editTrackList", async function (request, reply) {
 
 // Returns detailed track position + progress for *all* radio stations (includes % progress, current track)
 fastify.get("/getAllTrackPositions", function (request, reply) {
-  return { [radio.name]: radio.trackObject.track.position };
+  const allTrackPositions = {};
+  RadioManager.forEach((radio) => {
+    allTrackPositions[radio.name] = radio.trackObject.track.position;
+  });
+  return allTrackPositions;
 });
 
 // Returns segment position for *all* radio stations
 fastify.get("/getAllSegmentPositions", function (request, reply) {
-  return { [radio.name]: radio.trackObject.currentSegment.position };
+  const allSegmentPositions = {};
+  RadioManager.forEach((radio) => {
+    allSegmentPositions[radio.name] = radio.trackObject.currentSegment.position;
+  });
+  return allSegmentPositions;
 });
 
 fastify.post("/admin/reorderTracklist", async function (request, reply) {
@@ -1083,8 +1082,10 @@ fastify.post("/admin/reorderTracklist", async function (request, reply) {
       .send({ error: "newOrder array of track IDs required" });
   }
 
-  // Single station
-  const radioObj = radio;
+  const radio = RadioManager.find((r) => r.name === stationName);
+  if (!radio) {
+    return reply.code(404).send({ error: "station not found" });
+  }
 
   // Reorder using helper
   const newTracklist = await reorderTracklist(newOrder);
