@@ -470,6 +470,8 @@ function playRadioStation(radioStation) {
         `🔄 | ${radio.name} - End of playlist reached (${tracklist.length} tracks), resetting to 0`,
       );
       nextTrackNum = 0;
+      radio.trackNum = 0;
+      playRadioStation(RadioManager[0])
     }
     radio.trackNum = nextTrackNum;
     const trackEntry = tracklist[radio.trackNum];
