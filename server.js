@@ -463,7 +463,15 @@ function playRadioStation(radioStation) {
       radio.trackNum = 0;
     }
 
-    radio.trackNum = (radio.trackNum + 1) % tracklist.length;
+    // FIXED: Handle end-of-playlist loop (single track case)
+    let nextTrackNum = radio.trackNum + 1;
+    if (nextTrackNum >= tracklist.length) {
+      console.log(
+        `🔄 | ${radio.name} - End of playlist reached (${tracklist.length} tracks), resetting to 0`,
+      );
+      nextTrackNum = 0;
+    }
+    radio.trackNum = nextTrackNum;
     const trackEntry = tracklist[radio.trackNum];
     if (!trackEntry || !trackEntry["Track ID"]) {
       console.warn(
@@ -518,28 +526,32 @@ function playRadioStation(radioStation) {
         radio.currentTrackId = null;
         return nextTrack(radio); // Skip invalid
       }
+      const playedId = radio.currentTrackId;
       playTrack(radio, trackData);
 
-      // Queue rotation: move played track to end of tracklist (User Task 2)
+      // FIXED: Safe post-play rotation (skip single track loop)
       try {
-        const freshTracklist = await readTracklistFromStorage();
-        if (freshTracklist.length > 0) {
-          const playedId = trackId;
-          const withoutPlayed = freshTracklist.filter(
-            (entry) => entry["Track ID"] !== playedId,
-          );
-          const newOrderIds = [
-            ...withoutPlayed.map((e) => e["Track ID"]),
-            playedId,
-          ];
-          await reorderTracklist(newOrderIds);
-          console.log(
-            `🔄 | ${radio.name} - Moved played track ${playedId.substring(0, 8)}... to end (${newOrderIds.length} tracks)`,
-          );
+        if (tracklist.length > 1) {
+          const freshTracklist = await readTracklistFromStorage();
+          if (freshTracklist.length > 0) {
+            const withoutPlayed = freshTracklist.filter(
+              (entry) => entry["Track ID"] !== playedId,
+            );
+            const newOrderIds = [
+              ...withoutPlayed.map((e) => e["Track ID"]),
+              playedId,
+            ];
+            await reorderTracklist(newOrderIds);
+            console.log(
+              `🔄 | ${radio.name} - Rotated ${playedId.substring(0, 8)}... to end (${newOrderIds.length} tracks)`,
+            );
+          }
+        } else {
+          console.log(`ℹ️ | ${radio.name} - Single track, skipping rotation`);
         }
       } catch (rotateErr) {
         console.error(
-          `🔥 | Queue rotation failed for ${trackId.substring(0, 8)}...:`,
+          `🔥 | Post-play rotation failed for ${playedId?.substring(0, 8)}...:`,
           rotateErr.message,
         );
       }
@@ -553,10 +565,9 @@ function playRadioStation(radioStation) {
   // Expose nextTrack so external code (admin endpoint) can trigger immediate start
   radioStation._nextTrack = () => nextTrack(radioStation);
 
-  // New helper: Handle deletion of current track mid-playback
-  async function handleTrackDeleted(radio) {
+  async function handleTrackDeleted(radio, reason = "unknown") {
     console.log(
-      `🛑 | ${radio.name} - handleTrackDeleted invoked for track ${radio.currentTrackId?.substring(0, 8)}...`,
+      `🛑 | ${radio.name} - handleTrackDeleted(${reason}) for track ${radio.currentTrackId?.substring(0, 8)}...`,
     );
 
     // Immediate stop
@@ -605,8 +616,42 @@ function playRadioStation(radioStation) {
     console.log(`▶️ | ${radio.name} - Resuming from adjusted position`);
     nextTrack(radio);
   }
-  // Clear gentle stop flags when starting new track
-  radioStation._finishCurrentSegment = false;
+  // Helper: Check if deleted track affects current/next position
+  async function needsPlaybackReset(radio, deletedTrackId) {
+    if (!radio.currentTrackId || !deletedTrackId)
+      return { needsReset: false, reason: "No current/deleted ID" };
+
+    const tracklist = await readTracklistFromStorage();
+    if (tracklist.length === 0)
+      return { needsReset: false, reason: "Empty list" };
+
+    // Compute current/next indices safely
+    let currentIdx = -1;
+    let nextIdx = -1;
+    for (let i = 0; i < tracklist.length; i++) {
+      if (tracklist[i]["Track ID"] === radio.currentTrackId) {
+        currentIdx = i;
+        nextIdx = (i + 1) % tracklist.length;
+        break;
+      }
+    }
+
+    const currentId = tracklist[currentIdx]?.["Track ID"];
+    const nextId = tracklist[nextIdx]?.["Track ID"];
+
+    if (currentId === deletedTrackId || nextId === deletedTrackId) {
+      return {
+        needsReset: true,
+        reason:
+          currentId === deletedTrackId
+            ? "Current track deleted"
+            : "Next track deleted",
+        currentIdx,
+        nextIdx,
+      };
+    }
+    return { needsReset: false, reason: "Not current/next" };
+  }
   radioStation._gentleStop = () => {
     radioStation._finishCurrentSegment = true;
     console.log(
@@ -1044,15 +1089,16 @@ fastify.post("/admin/deleteTrack", async function (request, reply) {
 
   console.log(`🗑️ Full delete of track ${trackId}`);
 
-  // Handle current track delete properly
-  if (radio.currentTrackId === trackId) {
+  // Handle current/next track delete properly (generalized)
+  const resetCheck = await needsPlaybackReset(radio, trackId);
+  if (resetCheck.needsReset) {
     console.log(
-      `🎯 | ${radio.name} - Current track deleted → handleTrackDeleted`,
+      `🎯 | ${radio.name} - ${resetCheck.reason} → handleTrackDeleted`,
     );
     await handleTrackDeleted(radio);
   } else {
     console.log(
-      `ℹ️ | ${radio.name} - Track deleted (not current), continuing...`,
+      `ℹ️ | ${radio.name} - Track deleted (not current/next), continuing...`,
     );
   }
 
@@ -1075,14 +1121,17 @@ fastify.post("/admin/rejectTrack", async function (request, reply) {
     `🚫 Rejected track ${trackId}, new length: ${newTracklist.length}`,
   );
 
-  // Smart interrupt after reject
-  const freshList = await readTracklistFromStorage();
-  const firstId = freshList[0]?.["Track ID"];
-  if (firstId && firstId !== radio.currentTrackId) {
-    console.log(`⏹️→▶️ | Reject: first changed → nextTrack`);
-    if (radio._nextTrack) radio._nextTrack();
+  // Handle current/next track reject properly (generalized)
+  const resetCheck = await needsPlaybackReset(radio, trackId);
+  if (resetCheck.needsReset) {
+    console.log(
+      `🎯 | ${radio.name} - ${resetCheck.reason} → handleTrackDeleted`,
+    );
+    await handleTrackDeleted(radio);
   } else {
-    console.log(`⏯️ | Reject: first same, no interrupt`);
+    console.log(
+      `ℹ️ | ${radio.name} - Track rejected (not current/next), continuing...`,
+    );
   }
 
   return reply.send({
