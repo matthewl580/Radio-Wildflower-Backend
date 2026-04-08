@@ -449,10 +449,24 @@ function playRadioStation(radioStation) {
   async function nextTrack(radio) {
     // ENHANCED: Handle empty/low tracklist via new handler (always refresh first)
     await handleEmptyTracklist(radio);
-    // If handleEmptyTracklist stopped us, we won't reach here
-    // Now safe to proceed (guaranteed non-empty after handler)
+    // If handleEmptyTracklist stopped us (set _stopCurrent=true), early return to prevent loop
+    if (radio._stopCurrent) {
+      console.log(
+        `⏹️ | ${radio.name} - Stopped by handleEmptyTracklist (empty list)`,
+      );
+      return;
+    }
 
     const tracklist = await readTracklistFromStorage(); // Final refresh for this cycle
+
+    // Double-check (defensive): should be non-empty after handler
+    if (tracklist.length === 0) {
+      console.error(
+        `🔥 | ${radio.name} - nextTrack called with empty list post-handler - aborting`,
+      );
+      radio._stopCurrent = true;
+      return;
+    }
 
     // Safety: ensure trackNum is valid (post-handler)
     if (radio.trackNum >= tracklist.length) {
@@ -573,13 +587,10 @@ function playRadioStation(radioStation) {
     radio._stopCurrent = true;
     radio._finishCurrentSegment = true;
     radio._stop(); // Clear timers
-
+radio._start();}
     // Wait brief moment for loops to exit
-    await new Promise((resolve) => setTimeout(resolve, 500));
 
-    // 2. Use shared empty handler (downloads fresh tracklist, handles empty, resumes if possible)
-    await handleEmptyTracklist(radio);
-  }
+    // 2. Use shared empty handler (downloads fresh tracklist, handles empty, resumes if possible)  }
   // Helper: Check if deleted track affects current/next position
   async function needsPlaybackReset(radio, deletedTrackId) {
     if (!radio.currentTrackId || !deletedTrackId)
