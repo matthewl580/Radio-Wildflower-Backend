@@ -929,6 +929,19 @@ fastify.get("/getAllTracks", async function (request, reply) {
   }
 });
 
+// Returns the current tracklist (ordered list of track references) from Firebase Storage
+fastify.get("/getTrackList", async function (request, reply) {
+  try {
+    const tracklist = await readTracklistFromStorage();
+    console.log(`ℹ️ | /getTrackList returning ${tracklist.length} tracks`);
+    reply.header("Content-Type", "application/json");
+    return { success: true, count: tracklist.length, tracklist: tracklist };
+  } catch (err) {
+    console.error("🔥 | ERROR - fetching tracklist:", err);
+    reply.code(500).send({ error: "Failed to fetch tracklist" });
+  }
+});
+
 // Edit the trackList for a given radio station
 // Protected under /admin so Basic Auth will be required by the existing hook
 // Expects JSON body: { stationName: string, trackList: string[] | string }
