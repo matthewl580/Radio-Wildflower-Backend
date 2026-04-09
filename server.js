@@ -447,20 +447,26 @@ function playRadioStation(radioStation) {
   radioStation._stopCurrent = false;
 
   async function nextTrack(radio) {
-    // EXPLICIT: Check for run-out before advance
-    const preTracklist = await readTracklistFromStorage();
-    if (preTracklist.length === 0) {
+    // ENHANCED: Handle empty/low tracklist via new handler (always refresh first)
+    await handleEmptyTracklist(radio);
+    // If handleEmptyTracklist stopped us (set _stopCurrent=true), early return to prevent loop
+    if (radio._stopCurrent) {
       console.log(
-        `🔄 | ${radio.name} - Run out of songs detected → full refill flow`,
+        `⏹️ | ${radio.name} - Stopped by handleEmptyTracklist (empty list)`,
       );
-      await handleEmptyTracklist(radio);
-      return; // Handler manages stop/resume
+      return;
     }
 
-    // ENHANCED: Handle edge cases via handler
-    await handleEmptyTracklist(radio); // Refreshes + handles empty/deletes
+    const tracklist = await readTracklistFromStorage(); // Final refresh for this cycle
 
-    const tracklist = await readTracklistFromStorage(); // Final sync
+    // Double-check (defensive): should be non-empty after handler
+    if (tracklist.length === 0) {
+      console.error(
+        `🔥 | ${radio.name} - nextTrack called with empty list post-handler - aborting`,
+      );
+      radio._stopCurrent = true;
+      return;
+    }
 
     // Safety: ensure trackNum is valid (post-handler)
     if (radio.trackNum >= tracklist.length) {
@@ -581,13 +587,10 @@ function playRadioStation(radioStation) {
     radio._stopCurrent = true;
     radio._finishCurrentSegment = true;
     radio._stop(); // Clear timers
-
+radio._start();}
     // Wait brief moment for loops to exit
-    await new Promise((resolve) => setTimeout(resolve, 500));
 
-    // 2. Use shared empty handler (downloads fresh tracklist, handles empty, resumes if possible)
-    await handleEmptyTracklist(radio);
-  }
+    // 2. Use shared empty handler (downloads fresh tracklist, handles empty, resumes if possible)  }
   // Helper: Check if deleted track affects current/next position
   async function needsPlaybackReset(radio, deletedTrackId) {
     if (!radio.currentTrackId || !deletedTrackId)
@@ -625,49 +628,43 @@ function playRadioStation(radioStation) {
     return { needsReset: false, reason: "Not current/next" };
   }
 
-  // ENHANCED: Handle empty/run-out/deletion (exact 4 steps)
+  // NEW: Handle empty tracklist (for run out of songs or post-delete empty)
   async function handleEmptyTracklist(radio) {
     console.log(
-      `🔄 | ${radio.name} - Refilling tracklist: executing 4-step recovery...`,
+      `🔄 | ${radio.name} - handleEmptyTracklist(): refreshing from Firebase...`,
     );
 
-    // 1. Download new tracklist from Firebase Storage
-    console.log(
-      `   📥 | Step 1: Downloading fresh TRACKLIST.json from Firebase Storage...`,
-    );
+    // 1. Download fresh tracklist
     const tracklist = await readTracklistFromStorage();
-    console.log(`   📋 | Step 1 complete: Loaded ${tracklist.length} tracks`);
+    console.log(
+      `📋 | ${radio.name} - Fresh tracklist length: ${tracklist.length}`,
+    );
 
-    // 2. Set our tracklist to that (effective for this radio)
-    radio.pendingTrackList = tracklist; // Temp set for consistency
-    radio.trackList = tracklist; // Update permanent tracklist
-    // 3. Stop currently playing track (immediate full stop)
-    console.log(`   🛑 | Step 3: Stopping current playback...`);
-    radio._stopCurrent = true;
-    radio._finishCurrentSegment = true;
-    radio._stop(); // Clear all timers
-    await new Promise((resolve) => setTimeout(resolve, 100)); // Brief settle
-
+    // 2. Stop current if empty
     if (tracklist.length === 0) {
-      console.log(`   ⚠️ | Steps complete: Empty list → stopped permanently`);
+      console.log(
+        `🛑 | ${radio.name} - Empty tracklist after refresh - stopping playback`,
+      );
+      radio._stopCurrent = true;
+      radio._finishCurrentSegment = true;
       radio.trackNum = 0;
       radio.currentTrackId = null;
-      return;
+      return; // No resume
     }
 
-    // 4. Play currently playing Firebase track (resume logical position)
-    console.log(
-      `   ▶️ | Step 4: Resuming from Firebase position ${radio.trackNum}...`,
-    );
-    // Validate position post-refill
+    // 3. Validate/reset position safely
     if (radio.trackNum >= tracklist.length || radio.trackNum < 0) {
-      console.log(`   🔧 | Resetting invalid position ${radio.trackNum} → 0`);
+      console.log(
+        `🔧 | ${radio.name} - Invalid trackNum ${radio.trackNum} → reset to 0`,
+      );
       radio.trackNum = 0;
     }
-    delete radio.pendingTrackList; // Clear temp after resume
-    console.log(`✅ | All 4 steps complete: Refilled → Stopped → Resumed`);
 
-    nextTrack(radio); // Guaranteed non-empty
+    // 4. Resume playback (play current Firebase track position)
+    console.log(
+      `▶️ | ${radio.name} - Resuming from valid position ${radio.trackNum}`,
+    );
+    nextTrack(radio);
   }
 
   radioStation._gentleStop = () => {
@@ -1107,11 +1104,20 @@ fastify.post("/admin/deleteTrack", async function (request, reply) {
 
   console.log(`🗑️ Full delete of track ${trackId}`);
 
-  // ALWAYS trigger full 4-step recovery on deletion (covers all cases)
-  console.log(
-    `🎯 | ${radio.name} - Post-delete: Triggering full refill → stop → resume flow`,
-  );
-  await handleEmptyTracklist(radio);
+  // Handle current/next track delete properly (generalized, now via enhanced handler)
+  const resetCheck = await needsPlaybackReset(radio, trackId);
+  if (resetCheck.needsReset) {
+    console.log(
+      `🎯 | ${radio.name} - ${resetCheck.reason} → handleTrackDeleted`,
+    );
+    await handleTrackDeleted(radio);
+  } else {
+    console.log(
+      `ℹ️ | ${radio.name} - Track deleted (not current/next), continuing...`,
+    );
+    // Trigger refresh check even for non-critical deletes (robustness)
+    await handleEmptyTracklist(radio);
+  }
 
   return reply.send({ success: true, deleted: trackId });
 });
@@ -1133,11 +1139,19 @@ fastify.post("/admin/rejectTrack", async function (request, reply) {
   );
 
   // Handle current/next track reject properly (generalized, now via enhanced handler)
-  // ALWAYS trigger full 4-step recovery on reject (consistent with delete)
-  console.log(
-    `🎯 | ${radio.name} - Post-reject: Triggering full refill → stop → resume flow`,
-  );
-  await handleEmptyTracklist(radio);
+  const resetCheck = await needsPlaybackReset(radio, trackId);
+  if (resetCheck.needsReset) {
+    console.log(
+      `🎯 | ${radio.name} - ${resetCheck.reason} → handleTrackDeleted`,
+    );
+    await handleTrackDeleted(radio);
+  } else {
+    console.log(
+      `ℹ️ | ${radio.name} - Track rejected (not current/next), continuing...`,
+    );
+    // Trigger refresh check even for non-critical rejects (robustness)
+    await handleEmptyTracklist(radio);
+  }
 
   return reply.send({
     success: true,
