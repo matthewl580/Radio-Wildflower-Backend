@@ -433,8 +433,9 @@ async function start() {
   console.log(
     `🟢 | Starting radio manager for ${RadioManager.length} station(s)`,
   );
-  // Ensure initial TRACKLIST.json exists
-  await writeTracklistToStorage([]);
+  // Ensure TRACKLIST.json exists without wiping an existing playlist
+  const existingTracklist = await readTracklistFromStorage();
+  await writeTracklistToStorage(existingTracklist);
   RadioManager.forEach((radio) => console.log(`→ Station: ${radio.name}`));
   RadioManager[0] && playRadioStation(RadioManager[0]); // Play only first station
 }
@@ -469,22 +470,15 @@ function playRadioStation(radioStation) {
     }
 
     // Safety: ensure trackNum is valid (post-handler)
-    if (radio.trackNum >= tracklist.length) {
+    if (radio.trackNum >= tracklist.length || radio.trackNum < 0) {
       console.log(
-        `🔧 | ${radio.name} - trackNum ${radio.trackNum} out of bounds → reset to 0`,
+        `🔧 | ${radio.name} - trackNum ${radio.trackNum} out of bounds → reset to -1`,
       );
-      radio.trackNum = 0;
+      radio.trackNum = -1;
     }
 
-    // FIXED: Handle end-of-playlist loop (single track case)
-    let nextTrackNum = radio.trackNum + 1;
-    if (nextTrackNum >= tracklist.length) {
-      console.log(
-        `🔄 | ${radio.name} - End of playlist reached (${tracklist.length} tracks), resetting to 0`,
-      );
-      nextTrackNum = 0;
-    }
-    radio.trackNum = nextTrackNum;
+    // Continuous loop: always advance to the next track and wrap around.
+    radio.trackNum = (radio.trackNum + 1 + tracklist.length) % tracklist.length;
     const trackEntry = tracklist[radio.trackNum];
     if (!trackEntry || !trackEntry["Track ID"]) {
       console.warn(
@@ -540,7 +534,7 @@ function playRadioStation(radioStation) {
         return nextTrack(radio); // Skip invalid
       }
       const playedId = radio.currentTrackId;
-      playTrack(radio, trackData);
+      await playTrack(radio, trackData);
 
       // FIXED: Safe post-play rotation (skip single track loop)
       try {
@@ -583,14 +577,22 @@ function playRadioStation(radioStation) {
       `🛑 | ${radio.name} - handleTrackDeleted(${reason}) for track ${radio.currentTrackId?.substring(0, 8)}...`,
     );
 
-    // 1. Stop currently playing (immediate)
+    // 1. Stop current playback immediately
     radio._stopCurrent = true;
     radio._finishCurrentSegment = true;
-    radio._stop(); // Clear timers
-radio._start();}
-    // Wait brief moment for loops to exit
+    radio._stop();
 
-    // 2. Use shared empty handler (downloads fresh tracklist, handles empty, resumes if possible)  }
+    // Give any active playback loops a chance to stop cleanly
+
+    radio.trackNum = -1;
+    radio.currentTrackId = null;
+    radio._stopCurrent = false;
+    radio._finishCurrentSegment = false;
+await nextTrack(radio);
+    await handleEmptyTracklist(radio);
+    
+    }
+  }
   // Helper: Check if deleted track affects current/next position
   async function needsPlaybackReset(radio, deletedTrackId) {
     if (!radio.currentTrackId || !deletedTrackId)
@@ -655,16 +657,15 @@ radio._start();}
     // 3. Validate/reset position safely
     if (radio.trackNum >= tracklist.length || radio.trackNum < 0) {
       console.log(
-        `🔧 | ${radio.name} - Invalid trackNum ${radio.trackNum} → reset to 0`,
+        `🔧 | ${radio.name} - Invalid trackNum ${radio.trackNum} → reset to -1`,
       );
-      radio.trackNum = 0;
+      radio.trackNum = -1;
     }
 
-    // 4. Resume playback (play current Firebase track position)
+    // 4. Keep the radio ready; nextTrack will choose the correct next song.
     console.log(
-      `▶️ | ${radio.name} - Resuming from valid position ${radio.trackNum}`,
+      `▶️ | ${radio.name} - Valid trackNum ${radio.trackNum}, ready to continue`,
     );
-    nextTrack(radio);
   }
 
   radioStation._gentleStop = () => {
