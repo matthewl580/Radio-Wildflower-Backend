@@ -521,7 +521,8 @@ function playRadioStation(radioStation) {
       console.log(
         `⏯️ | ${radio.name} - Continuing same track ${trackId.substring(0, 8)}... (trackNum advanced)`,
       );
-      return; // No interrupt needed
+      // Same ID can still be valid if the playlist contains duplicate entries.
+      // Continue with playback so the next list item will actually start.
     }
 
     console.log(
