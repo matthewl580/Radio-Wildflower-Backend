@@ -847,7 +847,7 @@ await nextTrack(radio);
 
   // Start the first track
   nextTrack(radioStation);
-}
+
 
 fastify.get("/getAllTrackInformation", async function (request, reply) {
   try {
