@@ -579,7 +579,6 @@ function playRadioStation(radioStation) {
 
     // 1. Stop current playback immediately
     radio._stopCurrent = true;
-    radio._finishCurrentSegment = true;
     radio._stop();
 
     // Give any active playback loops a chance to stop cleanly
@@ -587,11 +586,8 @@ function playRadioStation(radioStation) {
     radio.trackNum = -1;
     radio.currentTrackId = null;
     radio._stopCurrent = false;
-    radio._finishCurrentSegment = false;
-await nextTrack(radio);
+    await nextTrack(radio);
     await handleEmptyTracklist(radio);
-    
-    }
   }
   // Helper: Check if deleted track affects current/next position
   async function needsPlaybackReset(radio, deletedTrackId) {
@@ -648,7 +644,6 @@ await nextTrack(radio);
         `🛑 | ${radio.name} - Empty tracklist after refresh - stopping playback`,
       );
       radio._stopCurrent = true;
-      radio._finishCurrentSegment = true;
       radio.trackNum = 0;
       radio.currentTrackId = null;
       return; // No resume
@@ -668,13 +663,6 @@ await nextTrack(radio);
     );
   }
 
-  radioStation._gentleStop = () => {
-    radioStation._finishCurrentSegment = true;
-    console.log(
-      `⏸️ | ${radioStation.name} - gentleStop invoked (finish current segment)`,
-    );
-  };
-
   radioStation._stop = () => {
     radioStation._stopCurrent = true;
     // If a cancellable sleep is active, cancel it to stop immediately
@@ -684,7 +672,6 @@ await nextTrack(radio);
         radioStation._currentSleepTimer = null;
       }
       if (typeof radioStation._currentSleepResolver === "function") {
-        // Resolve the pending sleep so any awaiting logic continues immediately
         radioStation._currentSleepResolver();
         radioStation._currentSleepResolver = null;
       }
@@ -813,17 +800,11 @@ await nextTrack(radio);
         console.log(`⏹️ | ${radio.name} - Stopping segment playback.`);
         break;
       }
-      if (radio._finishCurrentSegment && position >= segment.duration - 2) {
-        console.log(
-          `🎯 | ${radio.name} - Finishing current segment due to gentleStop`,
-        );
-      }
       await cancellableSleep(radio, 1000);
       if (radio._stopCurrent) {
         console.log(`⏹️ | ${radio.name} - Stopping segment playback.`);
         break;
       }
-      await cancellableSleep(radio, 1000); // Simulate 1-second increments with cancellable sleep
       radio.trackObject.currentSegment.position = position + 1;
       radio.trackObject.track.position = trackPosition + position + 1; // Update total track position
 
@@ -837,17 +818,15 @@ await nextTrack(radio);
         return;
       }
 
-      if (!radio._stopCurrent) {
-        console.log(
-          `${radio.name} - Track Position: ${radio.trackObject.track.position}, Segment Position: ${radio.trackObject.currentSegment.position}`,
-        );
-      }
+      console.log(
+        `${radio.name} - Track Position: ${radio.trackObject.track.position}, Segment Position: ${radio.trackObject.currentSegment.position}`,
+      );
     }
   }
 
   // Start the first track
   nextTrack(radioStation);
-
+}
 
 fastify.get("/getAllTrackInformation", async function (request, reply) {
   try {
