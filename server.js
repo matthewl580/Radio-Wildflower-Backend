@@ -131,6 +131,15 @@ async function writeTracklistToStorage(tracklist) {
   }
 }
 
+async function ensureTracklistExists() {
+  const fileRef = storage.bucket().file("Tracks/TRACKLIST.json");
+  const [exists] = await fileRef.exists();
+  if (!exists) {
+    console.log("ℹ️ | TRACKLIST.json missing, creating empty placeholder");
+    await writeTracklistToStorage([]);
+  }
+}
+
 async function appendToTracklist(newEntry) {
   const tracklist = await readTracklistFromStorage();
   tracklist.push(newEntry);
@@ -152,6 +161,18 @@ async function removeFromTracklist(trackId) {
 
 async function reorderTracklist(newOrderIds) {
   const tracklist = await readTracklistFromStorage();
+  const existingIds = tracklist.map((entry) => entry["Track ID"]);
+  const unchanged =
+    newOrderIds.length === existingIds.length &&
+    newOrderIds.every((id, index) => id === existingIds[index]);
+
+  if (unchanged) {
+    console.log(
+      "ℹ️ | reorderTracklist called with unchanged order; skipping write",
+    );
+    return tracklist;
+  }
+
   const idMap = new Map(tracklist.map((entry) => [entry["Track ID"], entry]));
   const newList = newOrderIds.map((id) => idMap.get(id)).filter(Boolean);
   await writeTracklistToStorage(newList);
@@ -433,9 +454,8 @@ async function start() {
   console.log(
     `🟢 | Starting radio manager for ${RadioManager.length} station(s)`,
   );
-  // Ensure TRACKLIST.json exists without wiping an existing playlist
-  const existingTracklist = await readTracklistFromStorage();
-  await writeTracklistToStorage(existingTracklist);
+  // Ensure TRACKLIST.json exists but do not rewrite it every startup
+  await ensureTracklistExists();
   RadioManager.forEach((radio) => console.log(`→ Station: ${radio.name}`));
   RadioManager[0] && playRadioStation(RadioManager[0]); // Play only first station
 }
@@ -536,32 +556,11 @@ function playRadioStation(radioStation) {
       const playedId = radio.currentTrackId;
       await playTrack(radio, trackData);
 
-      // FIXED: Safe post-play rotation (skip single track loop)
-      try {
-        if (tracklist.length > 1) {
-          const freshTracklist = await readTracklistFromStorage();
-          if (freshTracklist.length > 0) {
-            const withoutPlayed = freshTracklist.filter(
-              (entry) => entry["Track ID"] !== playedId,
-            );
-            const newOrderIds = [
-              ...withoutPlayed.map((e) => e["Track ID"]),
-              playedId,
-            ];
-            await reorderTracklist(newOrderIds);
-            console.log(
-              `🔄 | ${radio.name} - Rotated ${playedId.substring(0, 8)}... to end (${newOrderIds.length} tracks)`,
-            );
-          }
-        } else {
-          console.log(`ℹ️ | ${radio.name} - Single track, skipping rotation`);
-        }
-      } catch (rotateErr) {
-        console.error(
-          `🔥 | Post-play rotation failed for ${playedId?.substring(0, 8)}...:`,
-          rotateErr.message,
-        );
-      }
+      // Do not mutate TRACKLIST.json on every track completion.
+      // Keeping the persisted list stable avoids GCS mutation rate limits.
+      console.log(
+        `ℹ️ | ${radio.name} - Completed play of ${playedId?.substring(0, 8)}... without rotating TRACKLIST.json`,
+      );
     } catch (err) {
       console.error(`🔥 | Error loading track ${trackId}:`, err);
       radio.currentTrackId = null;
